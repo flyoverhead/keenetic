@@ -1,0 +1,82 @@
+---
+
+- name: connect
+  ansible.builtin.include_tasks:
+    file: connect.yml
+    apply:
+      tags:
+        - keenetic.ssh
+        - keenetic.user
+  tags:
+    - keenetic.ssh
+    - keenetic.user
+
+- name: detect
+  ansible.builtin.include_tasks:
+    file: detect.yml
+    apply:
+      tags:
+        - keenetic.cron
+        - keenetic.packages
+        - keenetic.repo
+        - keenetic.ssh
+        - keenetic.user
+        - keenetic.xray
+  tags:
+    - keenetic.cron
+    - keenetic.packages
+    - keenetic.repo
+    - keenetic.ssh
+    - keenetic.user
+    - keenetic.xray
+
+- name: install
+  ansible.builtin.include_tasks:
+    file: install.yml
+  tags:
+    - keenetic.packages
+    - keenetic.repo
+
+# After `install`: preflight and xray need keenetic_packages applied first
+# (ca-certificates for xray.yml's get_url, iptables/ip for the hook) so a bare
+# router bootstraps. preflight still precedes xray -- the download URL depends on
+# the keenetic_xray_arch fact it sets.
+- name: preflight
+  ansible.builtin.include_tasks:
+    file: preflight.yml
+    apply:
+      tags:
+        - keenetic.xray
+  when:
+    - keenetic_xray_enabled | default(false)
+  tags:
+    - keenetic.xray
+
+- name: xray
+  ansible.builtin.include_tasks:
+    file: xray.yml
+    apply:
+      tags:
+        - keenetic.xray
+  when:
+    - keenetic_xray_enabled | default(false)
+  tags:
+    - keenetic.xray
+
+# Tagged keenetic.cron because config.yml holds only the cron task. Tag
+# filtering drops an include_tasks task itself before the file is loaded
+# (Block.filter_tagged_tasks, at iterator init), so tagging it ssh/user meant
+# `--tags keenetic.cron` never managed cron while `--tags keenetic.ssh` did --
+# inner tasks inherit the include's tags (Taggable.tags is extend=True). `apply`
+# stops the inner task inheriting anything wider.
+- name: config
+  ansible.builtin.include_tasks:
+    file: config.yml
+    apply:
+      tags:
+        - keenetic.cron
+  tags:
+    - keenetic.cron
+
+- name: handlers
+  ansible.builtin.meta: flush_handlers

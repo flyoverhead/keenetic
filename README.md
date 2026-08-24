@@ -1,0 +1,173 @@
+# `keenetic`
+
+Configures a Keenetic router: SSH access, package installation, cron jobs,
+and an optional xray/TProxy deployment.
+
+Published standalone at
+[github.com/flyoverhead/keenetic](https://github.com/flyoverhead/keenetic). A
+bare role rather than a `flyoverhead.*` collection, because it targets one
+appliance family and has no siblings to group with — but it follows the same
+conventions as those collections: prefixed variables, `section | action` task
+names, `<role>.<section>` tags and a production-profile `ansible-lint` clean.
+
+Targets Entware on KeeneticOS. `ansible_python_interpreter` must point at
+`/opt/bin/python3`, and the role bootstraps that interpreter over `raw` on first
+contact if it is missing.
+
+## Role variables
+
+| Variable | Description | Example |
+| :--- | :--- | :--- |
+| `keenetic_user` | Root user config: `name`, `password`, `authorized_ssh_keys` (public key basenames under `~/.ssh/` on the controller) | Definition example in [defaults/main.yml](defaults/main.yml) |
+| `keenetic_cron_jobs` | Cron jobs to install via `ansible.builtin.cron` | Definition example in [defaults/main.yml](defaults/main.yml) |
+| `keenetic_packages` | opkg packages installed unconditionally | Definition example in [defaults/main.yml](defaults/main.yml) |
+| `keenetic_repo_path` | Directory the custom opkg repo `.conf` files are written to | `/opt/etc/opkg` |
+| `keenetic_repos` | Extra opkg repos to add: `name`, `src`, `packages` | Definition example in [defaults/main.yml](defaults/main.yml) |
+| `keenetic_xray_enabled` | Whether this role manages xray at all (installs/updates config and binary) | `false` |
+| `keenetic_xray_service_state` | `started` \| `stopped` -- whether xray should actually be running, distinct from `keenetic_xray_enabled` | `started` |
+| `keenetic_xray_version` | xray version pinned for this router; compared against the installed binary for equality, not substring | `26.7.28` |
+| `keenetic_xray` | Paths, TProxy port, fwmark, routing table, LAN interface, log file, corp dummy range and download URL | Definition example in [defaults/main.yml](defaults/main.yml) |
+| `keenetic_xray_config_src` | Path on the controller to the rendered client profile copied to the router | `{{ inventory_dir }}/files/clients/{{ keenetic_xray_server_name }}-{{ inventory_hostname }}.json` |
+| `keenetic_xray_server_name` | Name of the xray server host this router's client profile was generated against | `my-vps` |
+
+`keenetic_user.authorized_ssh_keys` names public keys under `~/.ssh` **on the
+controller**, without the `.pub` suffix — [tasks/connect.yml](tasks/connect.yml)
+appends it. `id_ed25519` reads `~/.ssh/id_ed25519.pub`.
+
+## Facts set by this role
+
+| Fact | Description |
+| :--- | :--- |
+| `keenetic_ssh_port` | Set by `connect.yml` when the router is reached on a non-default port; used to render `dropbear.j2` and to move `ansible_port` |
+| `keenetic_default_ssh_port` | Result of the port-22 probe, used to decide whether the router is still on the stock port |
+| `keenetic_custom_ssh_port` | Result of the `keenetic_ssh_port` probe, used to decide whether `ansible_port` may move onto it |
+| `keenetic_check_connection_result` | Result of the initial `ping`, used to pick the bootstrap credentials |
+| `keenetic_controller_ssh_keys` | Public key material read off the controller, rendered into `authorized_keys.j2` |
+| `keenetic_python3_bootstrap` | Result of the `raw` python3 bootstrap, used only for its `changed_when` |
+| `keenetic_root_password` | `keenetic_user.password`, held `no_log` for the `user` module to hash |
+| `keenetic_update_result` | Result of `opkg update` in the `repos \| update cache` handler, which tolerates rc 1 |
+| `keenetic_opkg_architecture` | Raw `opkg print-architecture` output; authoritative because busybox `uname -m` cannot tell mips from mipsel |
+| `keenetic_xray_arch` | Derived from the above; used to build the xray download URL in `keenetic_xray.repo` |
+| `keenetic_xt_tproxy` | Whether the firmware ships `xt_TPROXY.ko` for the running kernel |
+| `keenetic_rci_http` | The `/rci/ip/http` response the port-443 precondition is read from |
+| `keenetic_https_on_443` | Whether the web UI still holds 443, which TProxy needs free |
+| `keenetic_xray_installed` / `keenetic_xray_installed_version` | `xray version` output and the version token extracted from it |
+| `keenetic_xray_stage` / `keenetic_xray_download` | Controller-side staging directory and release download |
+| `keenetic_xray_profile` | Whether `keenetic_xray_config_src` has been generated yet |
+| `keenetic_xray_status` | `S24xray status` output, compared against `keenetic_xray_service_state` |
+| `ansible_port` | Rewritten to 22 while bootstrapping, then to `keenetic_ssh_port` once dropbear has moved |
+| `ansible_password` | Rewritten to the stock password when the first connection is refused |
+
+## Notes
+
+- Stop xray with `keenetic_xray_service_state: stopped`, never a bare
+  `S24xray stop`. The service state is written to a flag file that survives
+  reboots, deploys and the geofile cron; stopping it out-of-band leaves that
+  flag out of sync and a later restart handler can bring xray back up
+  unexpectedly.
+- While xray is running, the router proxies its **entire LAN** via tproxy, so
+  taking it down (or leaving it down when it should be up) affects every
+  client on the network, not just this host.
+- `preflight.yml` must run before `xray.yml` -- the xray download URL depends
+  on the `keenetic_xray_arch` fact `preflight.yml` sets -- and both must run
+  after `install.yml`, which supplies `ca-certificates` (needed by xray's
+  `get_url`), `iptables` and `ip` (needed by the netfilter hook).
+- `xray.yml` will not render a client profile for you. It asserts
+  `keenetic_xray_config_src` exists and tells you the exact command to generate
+  it, which needs **both** `--tags xray.clients,xray.tuning` against the xray
+  server host.
+
+## Check mode
+
+`--check --diff` reports drift in `dropbear.conf`, `authorized_keys`, the opkg
+repo files, the cron jobs, the xray config, the netfilter hook and `S24xray`.
+
+Six probes carry `check_mode: false`, because they only read and later tasks
+branch on their output. Left to be skipped, each would fabricate a result that
+reads as a definite answer rather than "unknown":
+
+- The two `wait_for` port checks in [tasks/connect.yml](tasks/connect.yml).
+  `wait_for` declares no check mode support, and the `when` beneath each reads
+  `.msg | default("")`, so a skip resolves to "the port answered" — forcing
+  `ansible_port` to 22 on a router whose sshd is elsewhere.
+- `opkg print-architecture` and the `/rci/ip/http` GET in
+  [tasks/preflight.yml](tasks/preflight.yml). `command` fabricates rc 0 with
+  empty stdout under `--check`, which makes `keenetic_xray_arch` resolve to
+  `unknown`; `uri` is skipped outright before the module runs, which would
+  silently `when`-skip the port-443 assertion and report a green play with its
+  single most consequential precondition unchecked.
+- `xray version` and `S24xray status` in [tasks/xray.yml](tasks/xray.yml),
+  which otherwise read as "nothing installed" and "not running" and make every
+  dry run claim a binary install and a service change.
+
+Two things a check run cannot tell you:
+
+- **It does not work against a router that has not been bootstrapped yet.**
+  The python3 bootstrap is `ansible.builtin.raw`, which is skipped under
+  `--check`, and every module task after it needs the interpreter that task
+  installs. Run the role for real once first.
+- **The service state is reported, not converged.** `xray | set the
+  administrative service state` uses `touch`, which reports `changed` on every
+  real run by design and so carries `changed_when: false`; the flag file
+  therefore appears unchanged in a check run whatever the declared state is.
+  Read `xray | converge the service to its declared state` instead — that is
+  the task that would act.
+
+The preflight assertions do run, so a check against a bootstrapped aarch64
+router is a genuine way to verify the `xt_TPROXY` and port-443 preconditions
+without touching anything.
+
+## Tags
+
+| Tag | Purpose |
+| :--- | :--- |
+| `keenetic.cron` | Cron job management |
+| `keenetic.packages` | Base opkg package installation |
+| `keenetic.repo` | Custom opkg repo setup |
+| `keenetic.ssh` | Dropbear config, authorized_keys, ssh port detection/change |
+| `keenetic.user` | Root password and connection bootstrap |
+| `keenetic.xray` | Preflight checks and xray install/config/service state |
+
+`detect.yml` carries all six tags, so any single tag still runs the fact
+gathering it depends on — `preflight.yml` reads `ansible_facts.kernel` for the
+`xt_TPROXY` path, which is why `keenetic.xray` is in that list too.
+
+`connect.yml` carries only `keenetic.ssh` and `keenetic.user`. A `keenetic.cron`,
+`keenetic.packages`, `keenetic.repo` or `keenetic.xray` run therefore does **not**
+re-run the connection bootstrap, and relies on `ansible_port` and the
+credentials in inventory already being correct for the router as it stands.
+That is deliberate: the bootstrap changes the root password and rewrites
+dropbear's config, which no other tag should imply.
+
+`keenetic.xray` additionally requires `keenetic_xray_enabled: true` — the
+`preflight` and `xray` includes are gated on it, so a tagged run against a host
+with it `false` correctly does nothing.
+
+Tags do not discriminate *within* `install.yml`. `Taggable.tags` is
+`extend=True`, so its tasks inherit both of the include's tags on top of their
+own, and `--tags keenetic.packages` and `--tags keenetic.repo` each run the whole
+file. This is the same shape as `flyoverhead.server`'s `packages` include and is
+left alone for consistency with it; the per-task tags there document intent
+rather than gate execution.
+
+## Example playbook
+
+```yaml
+- name: keenetic
+  hosts: keenetic
+  ignore_unreachable: true
+  gather_facts: true
+
+  roles:
+    - role: keenetic
+      tags:
+        - keenetic
+```
+
+## License
+
+GPL-3.0-only
+
+## Author Information
+
+fLy0v3rH34d

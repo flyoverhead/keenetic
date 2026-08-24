@@ -1,0 +1,144 @@
+---
+
+- name: connect | ssh port
+  when:
+    - ansible_port != 22
+  block:
+
+    - name: connect | custom ssh port fact
+      ansible.builtin.set_fact:
+        keenetic_ssh_port: '{{ ansible_port }}'
+
+    - name: connect | default ssh port
+      # check_mode: false -- wait_for has no check mode, so --check skips it,
+      # the `default("")` below reads as "no timeout", and ansible_port is forced
+      # to 22 on a router whose sshd is elsewhere. Read-only TCP connect. Matches
+      # flyoverhead.server's roles/server/tasks/detect.yml.
+      become: false
+      delegate_to: localhost
+      ansible.builtin.wait_for:
+        port: 22
+        state: started
+        host: '{{ ansible_host }}'
+        connect_timeout: 5
+        timeout: 10
+      register: keenetic_default_ssh_port
+      check_mode: false
+      failed_when:
+        - '"Timeout when waiting" not in (keenetic_default_ssh_port.msg | default(""))'
+        - keenetic_default_ssh_port.failed | default(false)
+
+    - name: connect | default ssh port fact  # noqa: var-naming[no-role-prefix]
+      ansible.builtin.set_fact:
+        ansible_port: 22
+      when:
+        - '"Timeout when waiting" not in (keenetic_default_ssh_port.msg | default(""))'
+
+- name: connect | connection to host
+  ansible.builtin.ping:
+  register: keenetic_check_connection_result
+  failed_when:
+    - '"Connection refused" not in (keenetic_check_connection_result.msg | default(""))'
+    - '"Permission denied" not in (keenetic_check_connection_result.msg | default(""))'
+    - '"pong" not in (keenetic_check_connection_result.ping | default(""))'
+
+- name: connect | set keenetic_controller_ssh_keys fact
+  become: false
+  delegate_to: localhost
+  ansible.builtin.set_fact:
+    keenetic_controller_ssh_keys: >-
+      {{ keenetic_controller_ssh_keys | default([]) +
+      [lookup('file', lookup('env', 'HOME') +
+      '/.ssh/' + item + '.pub')] }}
+  loop: '{{ keenetic_user.authorized_ssh_keys }}'
+
+- name: connect | user
+  tags:
+    - keenetic.user
+  block:
+
+    - name: connect | set default ansible password  # noqa: var-naming[no-role-prefix]
+      ansible.builtin.set_fact:
+        ansible_password: keenetic
+      when:
+        - '"Permission denied" in (keenetic_check_connection_result.msg | default(""))'
+
+    - name: connect | bootstrap python3 for ansible modules
+      become: true
+      ansible.builtin.raw: >-
+        /opt/bin/opkg list-installed python3 | grep -q . ||
+        { /opt/bin/opkg update && /opt/bin/opkg install python3; }
+      register: keenetic_python3_bootstrap
+      changed_when: '"Installing python3" in (keenetic_python3_bootstrap.stdout | default(""))'
+
+    - name: connect | install shadow package
+      become: true
+      community.general.opkg:
+        name: shadow
+        state: present
+
+    - name: connect | set root password
+      ansible.builtin.set_fact:
+        keenetic_root_password: '{{ keenetic_user.password }}'
+      no_log: true
+
+    - name: connect | change root password
+      become: true
+      ansible.builtin.user:
+        name: root
+        password: >-
+          {{ keenetic_root_password | password_hash("sha512", 65534 |
+          random(seed=inventory_hostname) | string) }}
+
+- name: connect | ssh
+  tags:
+    - keenetic.ssh
+  block:
+
+    - name: connect | check custom port {{ keenetic_ssh_port }}
+      # check_mode: false as above -- a skipped wait_for reads as "the custom
+      # port answered" and moves ansible_port onto it regardless.
+      become: false
+      delegate_to: localhost
+      ansible.builtin.wait_for:
+        port: '{{ keenetic_ssh_port | int }}'
+        state: started
+        host: '{{ ansible_host }}'
+        connect_timeout: 5
+        timeout: 10
+      register: keenetic_custom_ssh_port
+      check_mode: false
+      failed_when:
+        - '"Timeout when waiting" not in (keenetic_custom_ssh_port.msg | default(""))'
+        - keenetic_custom_ssh_port.failed | default(false)
+      when:
+        - (keenetic_ssh_port | default(22)) != ansible_port
+
+    - name: connect | add dropbear.conf
+      ansible.builtin.template:
+        src: dropbear.j2
+        dest: /opt/etc/config/dropbear.conf
+        owner: root
+        group: root
+        mode: '0600'
+      notify:
+        - dropbear | restart
+
+    - name: connect | add authorized_keys
+      ansible.builtin.template:
+        src: authorized_keys.j2
+        dest: /opt/etc/dropbear/authorized_keys
+        owner: root
+        group: root
+        mode: '0644'
+      notify:
+        - dropbear | restart
+
+    - name: connect | apply changes
+      ansible.builtin.meta: flush_handlers
+
+    - name: connect | set ansible_port to custom {{ keenetic_ssh_port }}  # noqa: var-naming[no-role-prefix]
+      ansible.builtin.set_fact:
+        ansible_port: '{{ keenetic_ssh_port | int }}'
+      when:
+        - '"Timeout when waiting" not in (keenetic_custom_ssh_port.msg | default(""))'

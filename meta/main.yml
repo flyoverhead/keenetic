@@ -1,0 +1,18 @@
+---
+
+galaxy_info:
+  role_name: keenetic
+  namespace: flyoverhead
+  author: flyoverhead
+  description: Keenetic router configuration
+  license: GPL-3.0-only
+  min_ansible_version: '2.16'
+  platforms:
+    - name: GenericUNIX
+      versions:
+        - all
+  galaxy_tags:
+    - keenetic
+    - router
+
+dependencies: []

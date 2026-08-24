@@ -1,0 +1,4 @@
+---
+
+- name: detect | gather remote facts
+  ansible.builtin.setup:

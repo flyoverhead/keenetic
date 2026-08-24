@@ -1,0 +1,82 @@
+---
+
+keenetic_xray_enabled: false
+
+# started | stopped -- whether xray runs, as distinct from
+# keenetic_xray_enabled, which is whether the role manages xray at all. Both are
+# needed: disabling the role stops config/binary updates yet leaves S24xray free
+# to auto-start at boot, so it cannot express "installed, managed, deliberately
+# not running". `stopped` writes a flag S24xray's start honours, so the intent
+# survives a reboot, a deploy and the geofile cron.
+keenetic_xray_service_state: started
+
+keenetic_xray_version: 26.7.28
+keenetic_xray:
+  bin: /opt/sbin/xray
+  conf_dir: /opt/etc/xray
+  asset_dir: /opt/etc/xray/dat
+  tproxy_port: 7895
+  mark: 1
+  table: 100
+  lan_iface: br0
+  # The profile keeps loglevel at info (warning hides rejected REALITY
+  # handshakes) with no access/error paths, so xray writes to stdout. /opt is the
+  # ext4 external drive, not the tiny read-only squashfs on /, so there is room;
+  # start() rotates to .1 anyway.
+  log_file: /opt/var/log/xray.log
+  # macOS will not route 10/8 into a utun, so /etc/hosts maps each such name to
+  # its own address here. The addresses are placeholders -- the local client
+  # routes by sniffed SNI -- and the hook RETURNs the range so a tunnel-down
+  # device fails fast locally instead of having the router dial a fiction.
+  #
+  # Not 198.51.100.0/24: KeeneticOS holds 198.51.100.11/32 on its ezcfg0 KeenDNS
+  # interface and serves its admin UI there, so names pointed into that range
+  # resolve to the router itself. Check `ip -4 addr` before moving this.
+  corp_dummy_range: 203.0.113.0/24
+  repo: >-
+    https://github.com/XTLS/Xray-core/releases/download/v{{
+    keenetic_xray_version }}/Xray-linux-{{ keenetic_xray_arch }}.zip
+
+keenetic_user:
+  name: root
+  password: keenetic # can be changed for password update
+  authorized_ssh_keys:
+    - id_ed25519 # name of public key (without *.pub extension) stored in ~/.ssh/ controller folder, e.g.: id_ed25519.pub
+
+keenetic_packages:
+  - bind-dig
+  - busybox
+  - ca-certificates
+  - coreutils-sort
+  - cron
+  - curl
+  - dnsmasq-full
+  # - dnscrypt-proxy2
+  - git
+  - git-http
+  - grep
+  - gzip
+  - ip-full
+  - ipset
+  - iptables
+  - libzip-gnutls
+  - lsof
+  - mc
+  - nmap
+  - unzip
+  - wget-ssl
+  # - xtables-addons_legacy
+
+keenetic_repo_path: /opt/etc/opkg
+keenetic_repos: []
+  # - name: nfqws-keenetic
+  #   src: src/gz nfqws-keenetic https://anonym-tsk.github.io/nfqws-keenetic/all
+  #   packages:
+  #     - nfqws-keenetic
+  #     - nfqws-keenetic-web
+
+keenetic_cron_jobs: []
+  # - name: update xray geofiles
+  #   hour: 5
+  #   minute: 30
+  #   job: /opt/etc/init.d/S24xray update-geofiles

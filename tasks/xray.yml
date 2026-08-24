@@ -1,0 +1,224 @@
+---
+
+- name: xray | create directories
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - '{{ keenetic_xray.conf_dir }}'
+    - '{{ keenetic_xray.asset_dir }}'
+    # S24xray also mkdir -p's this, so ownership/mode are declared here rather
+    # than left to the init script's umask.
+    - '{{ keenetic_xray.log_file | dirname }}'
+
+- name: xray | read installed version
+  # check_mode: false -- command has no check mode, so --check fabricates empty
+  # stdout and the install block below would claim a needed install on every dry
+  # run. Read-only, as in preflight.yml.
+  ansible.builtin.command:
+    cmd: '{{ keenetic_xray.bin }} version'
+  register: keenetic_xray_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Equality on an extracted token, not a `not in` substring test: pinning 26.7.2
+# while 26.7.28 is installed makes the substring match, so the install would be
+# skipped and the router would silently keep the wrong version.
+- name: xray | extract the installed version
+  ansible.builtin.set_fact:
+    keenetic_xray_installed_version: >-
+      {{ (keenetic_xray_installed.stdout | default('') |
+      regex_search('Xray ([0-9]+\.[0-9]+\.[0-9]+)', '\1') |
+      default([], true))[0] | default('', true) }}
+
+# No match (no binary yet, or garbled output) yields '', which reads as "not the
+# pinned version", so the block runs rather than raising or false-skipping.
+- name: xray | install binary
+  when: >-
+    keenetic_xray_version | string != keenetic_xray_installed_version
+  block:
+
+    - name: xray | install the binary, ensuring the staging directory is cleaned up
+      block:
+
+        - name: xray | download and extract on the controller
+          become: false
+          delegate_to: localhost
+          block:
+
+            - name: xray | create a staging directory
+              ansible.builtin.tempfile:
+                state: directory
+                suffix: xray
+              register: keenetic_xray_stage
+
+            - name: xray | download the release archive
+              ansible.builtin.get_url:
+                url: '{{ keenetic_xray.repo }}'
+                dest: '{{ keenetic_xray_stage.path }}/xray.zip'
+                mode: '0644'
+              register: keenetic_xray_download
+              until: keenetic_xray_download is succeeded
+              retries: 3
+
+            - name: xray | extract the binary
+              ansible.builtin.unarchive:
+                src: '{{ keenetic_xray_stage.path }}/xray.zip'
+                dest: '{{ keenetic_xray_stage.path }}'
+                include:
+                  - xray
+
+        - name: xray | copy the binary to the router
+          ansible.builtin.copy:
+            src: '{{ keenetic_xray_stage.path }}/xray'
+            dest: '{{ keenetic_xray.bin }}'
+            owner: root
+            group: root
+            mode: '0755'
+          notify:
+            - xray | restart
+
+      always:
+
+        # Runs on success or failure, so no run leaves the archive in a
+        # controller tempdir. Guarded on the path being defined in case the
+        # tempfile task never registered one.
+        - name: xray | remove the staging directory
+          become: false
+          delegate_to: localhost
+          ansible.builtin.file:
+            path: '{{ keenetic_xray_stage.path }}'
+            state: absent
+          when: keenetic_xray_stage.path is defined
+
+- name: xray | assert the client profile has been generated
+  become: false
+  delegate_to: localhost
+  ansible.builtin.stat:
+    path: '{{ keenetic_xray_config_src }}'
+  register: keenetic_xray_profile
+
+- name: xray | require the client profile
+  ansible.builtin.assert:
+    that:
+      - keenetic_xray_profile.stat.exists
+    fail_msg: >-
+      {{ keenetic_xray_config_src }} does not exist. This role does not render
+      client profiles -- generate it on {{ keenetic_xray_server_name }} first,
+      with {{ inventory_hostname }} listed among that server's xray clients.
+      Rendering profiles needs BOTH the client-readback and the config-render
+      tags of the xray server role: the render consumes facts that only the
+      readback sets, so the tuning tag alone dies on an undefined
+      `xray_server_keys_exists` before writing anything.
+      Note that re-rendering also rewrites the server config. If that task
+      reports changed rather than ok it restarts the server container and
+      briefly interrupts every device using it, which is why generating the
+      profile stays a deliberate manual step rather than a task in this play.
+
+- name: xray | install the config
+  ansible.builtin.copy:
+    src: '{{ keenetic_xray_config_src }}'
+    dest: '{{ keenetic_xray.conf_dir }}/config.json'
+    owner: root
+    group: root
+    mode: '0600'
+  notify:
+    - xray | restart
+
+- name: xray | install geofiles
+  ansible.builtin.get_url:
+    url: '{{ item.url }}'
+    dest: '{{ keenetic_xray.asset_dir }}/{{ item.name }}'
+    mode: '0644'
+  loop:
+    - name: geoip.dat
+      url: https://github.com/v2fly/geoip/releases/latest/download/geoip.dat
+    - name: geosite.dat
+      url: https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat
+  loop_control:
+    label: '{{ item.name }}'
+  notify:
+    - xray | restart
+
+- name: xray | create the ndm netfilter hook directory
+  ansible.builtin.file:
+    path: /opt/etc/ndm/netfilter.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+# Written to a temp path and moved into place: ndm can fire the hook mid-write
+# on a DHCP renew, and a truncated hook installs a partial ruleset.
+- name: xray | install the ndm netfilter hook
+  ansible.builtin.template:
+    src: netfilter-proxy.sh.j2
+    dest: /opt/etc/ndm/netfilter.d/proxy.sh
+    owner: root
+    group: root
+    mode: '0755'
+    validate: sh -n %s
+  notify:
+    - xray | restart
+
+- name: xray | install the init script
+  ansible.builtin.template:
+    src: S24xray.j2
+    dest: /opt/etc/init.d/S24xray
+    owner: root
+    group: root
+    mode: '0755'
+    validate: sh -n %s
+  notify:
+    - xray | restart
+
+- name: xray | require a valid service state
+  ansible.builtin.assert:
+    that:
+      - keenetic_xray_service_state in ['started', 'stopped']
+    fail_msg: >-
+      keenetic_xray_service_state must be 'started' or 'stopped', got
+      {{ keenetic_xray_service_state | default('undefined') }}. A typo would
+      otherwise be read as "not started" and silently disable xray.
+
+# Ordering is the point: after the init script, so the script honouring this
+# flag is in place, and before main.yml's flush_handlers, so any `xray | restart`
+# notified above also sees it. Otherwise a deploy's restart handler starts an
+# xray that was stopped on purpose.
+- name: xray | set the administrative service state
+  ansible.builtin.file:
+    path: '{{ keenetic_xray.conf_dir }}/disabled'
+    state: '{{ "absent" if keenetic_xray_service_state == "started" else "touch" }}'
+    owner: root
+    group: root
+    mode: '0644'
+  # `touch` always reports changed; only absent->present is a real change, and
+  # the flag's content is never read.
+  changed_when: false
+
+# check_mode: false as above -- fabricated empty stdout reads as "not running"
+# and would make the converge task claim a change on every dry run.
+- name: xray | read the current service state
+  ansible.builtin.command:
+    cmd: /opt/etc/init.d/S24xray status
+  register: keenetic_xray_status
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Makes the declared state real rather than merely intended: without it,
+# `stopped` binds only on the next `start` call, and `started` depends on some
+# other task having notified the restart handler.
+- name: xray | converge the service to its declared state
+  ansible.builtin.command:
+    cmd: >-
+      /opt/etc/init.d/S24xray
+      {{ 'start' if keenetic_xray_service_state == 'started' else 'stop' }}
+  changed_when: true
+  when: >-
+    (keenetic_xray_service_state == 'started') !=
+    ('xray running' in keenetic_xray_status.stdout | default(''))

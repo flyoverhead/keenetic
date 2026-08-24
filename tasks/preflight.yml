@@ -1,0 +1,112 @@
+---
+
+- name: preflight | read entware architecture
+  # check_mode: false -- command has no check mode, so --check fabricates rc 0
+  # with empty stdout and keenetic_xray_arch would resolve to 'unknown' on every
+  # dry run. Read-only, so forcing real execution is safe.
+  ansible.builtin.command:
+    cmd: opkg print-architecture
+  register: keenetic_opkg_architecture
+  changed_when: false
+  check_mode: false
+
+# Not ansible_facts.architecture: busybox `uname -m` reports "mips" on
+# little-endian Keenetics, so it cannot tell mips from mipsel.
+- name: preflight | set keenetic_xray_arch fact
+  ansible.builtin.set_fact:
+    keenetic_xray_arch: >-
+      {{ 'arm64-v8a' if 'aarch64' in keenetic_opkg_architecture.stdout else
+      'mips32le' if 'mipsel' in keenetic_opkg_architecture.stdout else
+      'mips32' if 'mips' in keenetic_opkg_architecture.stdout else
+      'unknown' }}
+
+- name: preflight | require aarch64
+  ansible.builtin.assert:
+    that:
+      - keenetic_xray_arch == 'arm64-v8a'
+    fail_msg: >-
+      {{ inventory_hostname }} reports architecture
+      '{{ keenetic_xray_arch }}' from opkg print-architecture, not arm64-v8a.
+      xray is only supported on aarch64 routers here; mips boards are out of
+      scope. Set keenetic_xray_enabled: false for this host.
+      Raw opkg print-architecture output: {{ keenetic_opkg_architecture.stdout }}
+
+- name: preflight | require the firmware netfilter modules
+  ansible.builtin.stat:
+    path: /lib/modules/{{ ansible_facts.kernel }}/xt_TPROXY.ko
+  register: keenetic_xt_tproxy
+
+- name: preflight | assert xt_TPROXY is available
+  ansible.builtin.assert:
+    that:
+      - keenetic_xt_tproxy.stat.exists
+    fail_msg: >-
+      xt_TPROXY.ko is missing from
+      /lib/modules/{{ ansible_facts.kernel }}/.
+      Install the KeeneticOS component "Модули ядра подсистемы Netfilter"
+      (Kernel modules for Netfilter) in the web UI. It only appears in the
+      component list after the IPv6 component is enabled. Note this module
+      comes from the firmware -- there is no opkg package for it, and
+      iptables-mod-tproxy does not exist in Entware.
+
+- name: preflight | read the router web UI ports
+  # check_mode: false -- the uri action plugin sets _supports_check_mode =
+  # False, so --check skips it before the module runs and keenetic_rci_http never
+  # gets a .json key. Every dry run would then silently skip the port-443
+  # assertion below and report green without checking it. Read-only GET.
+  ansible.builtin.uri:
+    url: http://127.0.0.1:79/rci/ip/http
+    return_content: true
+  register: keenetic_rci_http
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Fails closed, not skips. With failed_when: false above, a non-JSON body or
+# unreachable listener would otherwise let the port-443 checks `when`-skip, so
+# "could not verify" would render identically to "verified and fine".
+- name: preflight | require a readable RCI response
+  ansible.builtin.assert:
+    that:
+      - keenetic_rci_http.json is defined
+    fail_msg: >-
+      Could not read a usable JSON response from
+      http://127.0.0.1:79/rci/ip/http on {{ inventory_hostname }}
+      (HTTP status: {{ keenetic_rci_http.status | default('no response') }}).
+      The port-443 precondition for TProxy could not be verified, so this
+      is treated as a failure rather than skipped. Check that ndm is running
+      on the router and that
+      `curl http://127.0.0.1:79/rci/ip/http` returns JSON when run directly
+      on the router over ssh. If it does not, the router's RCI service is in
+      a bad state and needs investigating before xray deployment continues.
+
+# KeeneticOS omits `port`/`ssl.port` from the RCI response entirely when the
+# defaults are in effect, so an absent ssl.port with ssl.enable true means HTTPS
+# is on 443 -- the very thing that must move. Hence default(443), not
+# default(none): reading "no field" as "443 is free" would pass this assertion
+# while TProxy silently never works.
+- name: preflight | set keenetic_https_on_443 fact
+  ansible.builtin.set_fact:
+    keenetic_https_on_443: >-
+      {{ (keenetic_ssl_config.enable | default(false) | bool)
+      and ((keenetic_ssl_config.port | default(443) | int) == 443) }}
+  vars:
+    keenetic_ssl_config: >-
+      {{ (keenetic_rci_http.json | default({})).ssl | default({}) }}
+
+- name: preflight | assert port 443 is free for TProxy
+  ansible.builtin.assert:
+    that:
+      - not (keenetic_https_on_443 | default(false) | bool)
+      - ((keenetic_rci_http.json | default({})).port | default(80) | int) != 443
+    fail_msg: >-
+      Port 443 is still bound by the router web UI, so pure TProxy cannot
+      work: KeeneticOS's xt_TPROXY uses 443 internally. Note that leaving the
+      HTTPS port at its default counts as occupied -- the RCI API omits the
+      field entirely in that case, it does not report 443.
+      Fix in the web UI under "Users and access": set an explicit HTTPS port
+      other than 443 (e.g. 8443) and save the configuration. That both frees
+      443 and materialises the field so this check can see it.
+      This changes the remote-access URLs for this router: an address like
+      https://myrouter.keenetic.link becomes
+      https://myrouter.keenetic.link:8443.
