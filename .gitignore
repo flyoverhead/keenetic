@@ -6,3 +6,4 @@
 .yamllint
 .DS_Store
 .ansible
+.ansible-lint
