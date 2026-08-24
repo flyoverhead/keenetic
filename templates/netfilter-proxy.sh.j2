@@ -1,0 +1,198 @@
+#!/bin/sh
+# XKeen-style transparent proxy rules for xray. MANAGED BY ANSIBLE -- DO NOT EDIT.
+#
+# ndm owns the iptables ruleset and rebuilds it on DHCP renew, link change and
+# policy change, then runs every script in /opt/etc/ndm/netfilter.d/. This hook
+# is therefore the ONLY place rules are defined; anything installed from the
+# init script alone is wiped on the next rebuild.
+#
+# LAN clients only. No OUTPUT chain by design -- the router's own traffic goes
+# direct, so no routing loop is possible and no GID bypass or xt_owner is needed.
+
+PATH=/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+TPROXY_PORT={{ keenetic_xray.tproxy_port }}
+TPROXY_MARK={{ keenetic_xray.mark }}
+TPROXY_TABLE={{ keenetic_xray.table }}
+LAN_IFACE={{ keenetic_xray.lan_iface }}
+CHAIN=XRAY_PRE
+LOCKDIR=/var/run/xray-netfilter.lock
+LOCK_RETRIES=30
+LOCK_STALE_SECS=30
+
+log() { logger -t xray-tproxy "$*"; }
+
+# ndm invokes hooks for every (type, table) pair; only the IPv4 mangle pass
+# concerns us. Both vars are unset on a manual run, so neither guard turns a
+# by-hand invocation into a silent no-op.
+[ "${type}" = "ip6tables" ] && exit 0
+[ "${table}" != "mangle" ] && [ -n "${table}" ] && exit 0
+
+# Serialise against a concurrent ndm rebuild, which can otherwise leave a
+# half-built chain. flock is neither installed nor a busybox applet, so use a
+# mkdir lock -- atomic, no package needed. Reclaimed by age rather than by pid,
+# because a pid file would have to live inside LOCKDIR and would then break the
+# plain rmdir. The rebuild is flush-then-build, so racing a slow-but-live holder
+# costs one extra rebuild, not a corrupt ruleset.
+acquire_lock() {
+    i=0
+    while ! mkdir "${LOCKDIR}" 2>/dev/null; do
+        lock_mtime=$(date -r "${LOCKDIR}" +%s 2>/dev/null) || lock_mtime=0
+        now=$(date +%s)
+        if [ "${lock_mtime}" -gt 0 ] && [ $((now - lock_mtime)) -ge "${LOCK_STALE_SECS}" ]; then
+            log "lock ${LOCKDIR} older than ${LOCK_STALE_SECS}s; assuming abandoned and reclaiming"
+            rmdir "${LOCKDIR}" 2>/dev/null
+            continue
+        fi
+        i=$((i + 1))
+        if [ "${i}" -ge "${LOCK_RETRIES}" ]; then
+            log "could not acquire lock ${LOCKDIR} after ${i} tries; skipping this run"
+            return 1
+        fi
+        sleep 1
+    done
+    # Covers every exit path, including the xray-not-running exit below.
+    trap 'rmdir "${LOCKDIR}" 2>/dev/null' EXIT
+    return 0
+}
+
+acquire_lock || exit 0
+
+# Modules come from the firmware -- there is no opkg package, and
+# iptables-mod-tproxy does not exist in Entware.
+for module in xt_comment xt_TPROXY xt_socket; do
+    lsmod 2>/dev/null | grep -q "^${module} " && continue
+    path="/lib/modules/$(uname -r)/${module}.ko"
+    [ -f "${path}" ] && insmod "${path}" >/dev/null 2>&1
+done
+
+if ! lsmod 2>/dev/null | grep -q '^xt_TPROXY '; then
+    log "xt_TPROXY not loaded; install the Netfilter kernel modules component"
+    exit 1
+fi
+
+# With xray down, LAN-wide TPROXY rules would send every flow -- DNS included --
+# to a closed port with no auto-recovery, so tear the chain down instead. ndm
+# rebuilds PREROUTING but knows nothing about XRAY_PRE, so a chain from an
+# earlier run outlives the process it forwards to.
+#
+# pidof, not `pgrep -x`: busybox compares -x against argv[0] from
+# /proc/PID/cmdline (the full invoked path), so `pgrep -x xray` never matches a
+# process started as /opt/sbin/xray and this gate would exit 0 on every run,
+# installing nothing while reporting healthy. Matching -x against the full path
+# would re-couple the check to the invocation path. `pgrep -f xray` would
+# self-match this script's own command line.
+if ! pidof xray >/dev/null 2>&1; then
+    iptables -t mangle -D PREROUTING -i "${LAN_IFACE}" -j "${CHAIN}" 2>/dev/null
+    iptables -t mangle -F "${CHAIN}" 2>/dev/null
+    iptables -t mangle -X "${CHAIN}" 2>/dev/null
+    # Mark rule and local route left alone: with no chain nothing sets the mark,
+    # so both are inert, and `S24xray stop` owns removing them. Re-adding is
+    # grep-guarded and idempotent.
+    log "xray not running; rules removed, none installed"
+    exit 0
+fi
+
+# Every installing call goes through this accumulator, so the hook can never
+# report a ruleset it failed to install -- ndm can rebuild the mangle table
+# between the -N and the appends, and the success log used to be unconditional.
+rules_rc=0
+ipt() {
+    iptables -t mangle "$@" && return 0
+    log "FAILED: iptables -t mangle $*"
+    rules_rc=1
+}
+failed() {
+    log "FAILED: $*"
+    rules_rc=1
+}
+
+# Marked packets must be delivered locally for the TPROXY socket to accept them.
+# Matched on `lookup ${TPROXY_TABLE}`, not the mark: `ip rule show` formats
+# fwmark as hex, so a decimal comparison only worked while mark was 1 and would
+# silently duplicate the rule on every rebuild once it changed. Checked via the
+# accumulator because without this route the chain black-holes every LAN flow.
+ip rule show | grep -q "lookup ${TPROXY_TABLE}" ||
+    ip rule add fwmark "${TPROXY_MARK}" table "${TPROXY_TABLE}" ||
+    failed "ip rule add fwmark ${TPROXY_MARK} table ${TPROXY_TABLE}"
+ip route show table "${TPROXY_TABLE}" 2>/dev/null | grep -q 'local default' ||
+    ip route add local 0.0.0.0/0 dev lo table "${TPROXY_TABLE}" ||
+    failed "ip route add local 0.0.0.0/0 dev lo table ${TPROXY_TABLE}"
+
+# Rebuild from scratch: ndm re-runs this hook and appending would duplicate.
+# Teardown stays quiet -- deleting what is not there is the normal case.
+iptables -t mangle -D PREROUTING -i "${LAN_IFACE}" -j "${CHAIN}" 2>/dev/null
+iptables -t mangle -F "${CHAIN}" 2>/dev/null
+iptables -t mangle -X "${CHAIN}" 2>/dev/null
+ipt -N "${CHAIN}"
+
+# DNS FIRST, above the private-range bypass. LAN clients query the router, a
+# private address: bypassed first, those packets would resolve via the router's
+# own dnsmasq, the server's :53 hijack would never see them, and names that have
+# no public record would never resolve. Trade-off: LAN hostnames from dnsmasq
+# stop resolving. mDNS/.local is on :5353 and unaffected.
+ipt -A "${CHAIN}" -p udp --dport 53 \
+    -j TPROXY --on-port "${TPROXY_PORT}" --tproxy-mark "${TPROXY_MARK}" \
+    -m comment --comment "xray dns"
+ipt -A "${CHAIN}" -p tcp --dport 53 \
+    -j TPROXY --on-port "${TPROXY_PORT}" --tproxy-mark "${TPROXY_MARK}" \
+    -m comment --comment "xray dns"
+
+# 10/8 BEFORE THE BYPASS, same reason as DNS: it would otherwise RETURN and
+# never reach xray. This one rule is what makes the upstream 10/8 network
+# reachable LAN-wide rather than per-device, given a server that routes
+# 10.0.0.0/8 to a wireguard outbound and hijacks :53 to resolve its names.
+#
+# The whole of 10.0.0.0/8, matching that outbound's allowedIPs. Safe ONLY where
+# 10/8 is otherwise unused -- check `ip -4 addr` and `ip route` first. This is an
+# assumption, not a law: a site-to-site VPN or container bridge bringing 10/8
+# onto {{ keenetic_xray.lan_iface }} would get tunnelled instead of delivered locally.
+#
+# Kept above the bypass rather than left to the catch-all at the end, so the
+# intent survives someone re-adding 10/8 to the RETURN list.
+#
+# `-p` is mandatory, not stylistic: xt_TPROXY redirects to a port, so iptables
+# rejects the rule without a protocol match, and this hook fails closed -- one
+# malformed rule means no interception at all.
+ipt -A "${CHAIN}" -p tcp -d 10.0.0.0/8 \
+    -j TPROXY --on-port "${TPROXY_PORT}" --tproxy-mark "${TPROXY_MARK}" \
+    -m comment --comment "xray corp"
+ipt -A "${CHAIN}" -p udp -d 10.0.0.0/8 \
+    -j TPROXY --on-port "${TPROXY_PORT}" --tproxy-mark "${TPROXY_MARK}" \
+    -m comment --comment "xray corp"
+
+# 10.0.0.0/8 is deliberately absent -- see the rule above.
+#
+# {{ keenetic_xray.corp_dummy_range }} belongs here for the opposite reason: those addresses are a
+# client-local fiction (macOS will not route 10/8 into a utun, so /etc/hosts
+# gives each such name a placeholder and the device's own client routes by
+# sniffed SNI). When a device's tunnel drops, RETURN makes it fail fast locally
+# instead of having the router dial the placeholder for real.
+for cidr in 0.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 \
+            172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4 \
+            {{ keenetic_xray.corp_dummy_range }}; do
+    ipt -A "${CHAIN}" -d "${cidr}" -j RETURN
+done
+
+ipt -A "${CHAIN}" -p tcp \
+    -j TPROXY --on-port "${TPROXY_PORT}" --tproxy-mark "${TPROXY_MARK}"
+ipt -A "${CHAIN}" -p udp \
+    -j TPROXY --on-port "${TPROXY_PORT}" --tproxy-mark "${TPROXY_MARK}"
+
+# Attached last, so a chain that failed to build never receives traffic.
+ipt -A PREROUTING -i "${LAN_IFACE}" -j "${CHAIN}"
+
+# Fail closed. A half-built chain is worse than none: DNS rules landing without
+# the RFC1918 RETURNs would TPROXY LAN-local traffic too. Removing everything
+# degrades to "no proxy", which the next ndm rebuild retries from scratch.
+if [ "${rules_rc}" -ne 0 ]; then
+    iptables -t mangle -D PREROUTING -i "${LAN_IFACE}" -j "${CHAIN}" 2>/dev/null
+    iptables -t mangle -F "${CHAIN}" 2>/dev/null
+    iptables -t mangle -X "${CHAIN}" 2>/dev/null
+    log "rule installation FAILED; partial chain torn down, traffic is NOT intercepted"
+    exit 1
+fi
+
+log "rules installed on ${LAN_IFACE} -> :${TPROXY_PORT}"
+exit 0

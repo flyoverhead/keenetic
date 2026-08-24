@@ -1,0 +1,8 @@
+*.pub
+.vscode
+.vagrant
+.pre-commit-config.yaml
+.tflint.hcl
+.yamllint
+.DS_Store
+.ansible

@@ -1,0 +1,194 @@
+#!/bin/sh
+# xray service for Entware on KeeneticOS. MANAGED BY ANSIBLE -- DO NOT EDIT.
+#
+# Not an rc.func wrapper: it offers no post-start hook, and ordering matters --
+# start xray then install rules; remove rules then stop xray. All rule logic
+# lives in the ndm hook, its single source of truth.
+
+PATH=/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+export XRAY_LOCATION_ASSET={{ keenetic_xray.asset_dir }}
+
+BIN={{ keenetic_xray.bin }}
+CONF={{ keenetic_xray.conf_dir }}/config.json
+# Administrative "stay stopped" marker, from keenetic_xray_service_state.
+# `stop` alone cannot express intent -- a stopped xray is indistinguishable from
+# one not yet started, so the deploy handler, the boot auto-start and the geofile
+# cron each undid a deliberate stop. All three go through `start`, so it is
+# checked there.
+DISABLED={{ keenetic_xray.conf_dir }}/disabled
+LOGFILE={{ keenetic_xray.log_file }}
+HOOK=/opt/etc/ndm/netfilter.d/proxy.sh
+PIDFILE=/var/run/xray.pid
+CHAIN=XRAY_PRE
+LAN_IFACE={{ keenetic_xray.lan_iface }}
+
+log() { logger -t xray "$*"; }
+
+running() {
+    [ -f "${PIDFILE}" ] || return 1
+    kill -0 "$(cat "${PIDFILE}")" 2>/dev/null
+}
+
+wait_for_tproxy() {
+    # ndm loads module dependencies asynchronously after ndmc reports ready, so
+    # xt_TPROXY may not be loadable yet on a cold boot -- without this the hook
+    # fails at boot and the router silently has no proxy.
+    #
+    # Poll for loadedness, not for the .ko file: the file ships in the firmware
+    # and exists from the moment the rootfs mounts, so a file check always
+    # returned immediately regardless of whether the module was loadable.
+    i=0
+    while [ "${i}" -lt 30 ]; do
+        if lsmod 2>/dev/null | grep -q '^xt_TPROXY '; then
+            return 0
+        fi
+        path="/lib/modules/$(uname -r)/xt_TPROXY.ko"
+        if [ -f "${path}" ] && insmod "${path}" >/dev/null 2>&1; then
+            return 0
+        fi
+        i=$((i + 1))
+        sleep 2
+    done
+    log "timed out waiting for xt_TPROXY to become loadable"
+    return 1
+}
+
+start() {
+    # Before spawning anything: `start` installs the rules, so even a brief
+    # start briefly takes the LAN down. Returns 0, not 1 -- disabled is the
+    # intended state, and the ansible handler must not fail the play for it.
+    if [ -f "${DISABLED}" ]; then
+        log "start refused: ${DISABLED} exists"
+        echo "xray is administratively disabled (${DISABLED}); not starting"
+        return 0
+    fi
+
+    if running; then
+        echo "xray already running (pid $(cat "${PIDFILE}"))"
+        return 0
+    fi
+    [ -x "${BIN}" ] || { log "missing binary ${BIN}"; return 1; }
+    [ -f "${CONF}" ] || { log "missing config ${CONF}"; return 1; }
+
+    if ! "${BIN}" -test -config "${CONF}" >/dev/null 2>&1; then
+        log "config test failed, refusing to start"
+        "${BIN}" -test -config "${CONF}"
+        return 1
+    fi
+
+    wait_for_tproxy || return 1
+
+    ulimit -n 8192 2>/dev/null
+    # Neither setsid nor nohup exists here (busybox 1.37.0 builds neither), so
+    # reimplement nohup's mechanism: ignore SIGHUP in the child before exec'ing
+    # xray, or sshd signalling the process group when the ansible handler's
+    # channel closes kills xray right after a "successful" deploy. `exec`
+    # replaces the subshell in place, so $! is xray's own pid.
+    #
+    # Output to a file, not /dev/null: the profile sets log.loglevel info with no
+    # access/error paths, so xray writes to stdout, and discarding it made that
+    # setting inert. Rotated to .1 so the run that just died stays readable;
+    # growth is bounded by the daily geofile-cron restart.
+    mkdir -p "$(dirname "${LOGFILE}")" 2>/dev/null
+    [ -f "${LOGFILE}" ] && mv -f "${LOGFILE}" "${LOGFILE}.1"
+    ( trap '' HUP; exec "${BIN}" run -config "${CONF}" >>"${LOGFILE}" 2>&1 ) &
+    echo $! > "${PIDFILE}"
+    sleep 2
+
+    if ! running; then
+        log "xray failed to stay up"
+        rm -f "${PIDFILE}"
+        return 1
+    fi
+
+    if [ -x "${HOOK}" ]; then
+        "${HOOK}"
+        hook_rc=$?
+    else
+        log "hook ${HOOK} missing or not executable"
+        hook_rc=1
+    fi
+
+    if [ "${hook_rc}" -ne 0 ]; then
+        log "netfilter hook failed (rc=${hook_rc}); xray is running but LAN traffic is NOT intercepted"
+        echo "xray started but the netfilter hook failed -- traffic is NOT intercepted"
+        return 1
+    fi
+
+    log "started (pid $(cat "${PIDFILE}"))"
+    echo "xray started"
+}
+
+stop() {
+    iptables -t mangle -D PREROUTING -i "${LAN_IFACE}" -j "${CHAIN}" 2>/dev/null
+    iptables -t mangle -F "${CHAIN}" 2>/dev/null
+    iptables -t mangle -X "${CHAIN}" 2>/dev/null
+
+    # The hook installs three things -- chain, fwmark rule, local route -- so
+    # stop undoes all three. They are inert once the chain is gone, but a
+    # surprise for anyone debugging routing or wanting table
+    # {{ keenetic_xray.table }}. The hook's add is grep-guarded, so start
+    # re-adds them idempotently.
+    ip rule del fwmark {{ keenetic_xray.mark }} table {{ keenetic_xray.table }} 2>/dev/null
+    ip route flush table {{ keenetic_xray.table }} 2>/dev/null
+
+    if running; then
+        pid=$(cat "${PIDFILE}")
+        kill "${pid}" 2>/dev/null
+        i=0
+        while kill -0 "${pid}" 2>/dev/null && [ "${i}" -lt 10 ]; do
+            i=$((i + 1))
+            sleep 1
+        done
+        kill -9 "${pid}" 2>/dev/null
+    else
+        killall xray 2>/dev/null
+    fi
+    rm -f "${PIDFILE}"
+    log "stopped"
+    echo "xray stopped"
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; start ;;
+    status)
+        if running; then
+            echo "xray running (pid $(cat "${PIDFILE}"))"
+        else
+            echo "xray stopped"
+        fi
+        iptables -t mangle -L "${CHAIN}" -n -v 2>/dev/null || echo "no rules"
+        ;;
+    update-geofiles)
+        # Sampled before the downloads: the question is whether the operator
+        # left xray running, not whether it is running now.
+        if running; then was_running=1; else was_running=0; fi
+
+        for spec in \
+            "geoip.dat https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" \
+            "geosite.dat https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat"; do
+            name=$(echo "${spec}" | cut -d' ' -f1)
+            url=$(echo "${spec}" | cut -d' ' -f2)
+            curl -fsSL -o "${XRAY_LOCATION_ASSET}/${name}.new" "${url}" &&
+                mv "${XRAY_LOCATION_ASSET}/${name}.new" "${XRAY_LOCATION_ASSET}/${name}"
+        done
+
+        # Restart only to make a *running* xray reload the files. A bare
+        # `restart` here once started an xray that had been deliberately
+        # stopped, re-enabling LAN-wide interception unattended. Refreshing
+        # geofiles must never change whether the service runs.
+        if [ "${was_running}" -eq 1 ]; then
+            "$0" restart
+        else
+            log "geofiles updated; xray was not running, leaving it stopped"
+            echo "geofiles updated; xray left stopped"
+        fi
+        ;;
+    *) echo "Usage: $0 {start|stop|restart|status|update-geofiles}"; exit 1 ;;
+esac
+# No trailing `exit 0` on purpose: it would mask start's exit status (a failed
+# netfilter hook, say) and always report success to the ansible handler. The
+# script exits with the case branch's own status.

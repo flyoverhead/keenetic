@@ -1,0 +1,47 @@
+---
+
+- name: install | base packages
+  community.general.opkg:
+    name: '{{ keenetic_packages }}'
+    state: present
+  tags:
+    - keenetic.packages
+
+- name: install | create repo directory
+  ansible.builtin.file:
+    path: '{{ keenetic_repo_path }}'
+    owner: root
+    group: root
+    mode: '0755'
+    state: directory
+  tags:
+    - keenetic.repo
+
+- name: install | add repos
+  ansible.builtin.copy:
+    dest: '{{ keenetic_repo_path }}/{{ item.name }}.conf'
+    content: '{{ item.src }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: '{{ keenetic_repos }}'
+  loop_control:
+    label: '{{ item.name }}'
+  notify:
+    - repos | update cache
+  tags:
+    - keenetic.repo
+
+- name: install | update repos cache
+  ansible.builtin.meta: flush_handlers
+  tags:
+    - keenetic.repo
+
+- name: install | repo packages
+  community.general.opkg:
+    name: >-
+      {{ keenetic_repos | map(attribute='packages') | flatten }}
+    state: present
+  failed_when: false
+  tags:
+    - keenetic.repo

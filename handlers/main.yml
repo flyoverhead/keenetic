@@ -1,0 +1,28 @@
+---
+
+- name: repos | update cache
+  ansible.builtin.command:
+    cmd: opkg update
+  changed_when: true
+  register: keenetic_update_result
+  failed_when:
+    - keenetic_update_result.rc != 0
+    - keenetic_update_result.rc != 1
+
+- name: dropbear | restart
+  become: true
+  ansible.builtin.command:
+    cmd: /opt/etc/init.d/S51dropbear restart
+  changed_when: true
+
+- name: cron | restart
+  become: true
+  ansible.builtin.command:
+    cmd: /opt/etc/init.d/S10cron restart
+  changed_when: true
+
+- name: xray | restart
+  become: true
+  ansible.builtin.command:
+    cmd: /opt/etc/init.d/S24xray restart
+  changed_when: true

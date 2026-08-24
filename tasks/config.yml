@@ -1,0 +1,19 @@
+---
+
+- name: config | create cron job
+  ansible.builtin.cron:
+    name: '{{ item.name }}'
+    day: '{{ item.day | default(omit) }}'
+    minute: '{{ item.minute | default(omit) }}'
+    hour: '{{ item.hour | default(omit) }}'
+    weekday: '{{ item.weekday | default(omit) }}'
+    special_time: '{{ item.schedule | default(omit) }}'
+    job: '{{ item.job }}'
+    state: '{{ item.state | default("present") }}'
+  loop: '{{ keenetic_cron_jobs }}'
+  loop_control:
+    label: '{{ item.name }}'
+  notify:
+    - cron | restart
+  tags:
+    - keenetic.cron
