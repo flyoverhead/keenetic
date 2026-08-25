@@ -1,20 +1,31 @@
 # `keenetic`
 
+[![ansible-core](https://img.shields.io/badge/ansible--core-%E2%89%A52.16-black?logo=ansible&logoColor=white)](https://docs.ansible.com/ansible-core/devel/index.html)
+[![License](https://img.shields.io/badge/license-GPL--3.0--only-green)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Entware%20%2F%20KeeneticOS-0A6EBD)](#-quick-start)
+
 Configures a Keenetic router: SSH access, package installation, cron jobs,
 and an optional xray/TProxy deployment.
 
-Published standalone at
-[github.com/flyoverhead/keenetic](https://github.com/flyoverhead/keenetic). A
-bare role rather than a `flyoverhead.*` collection, because it targets one
-appliance family and has no siblings to group with — but it follows the same
-conventions as those collections: prefixed variables, `section | action` task
-names, `<role>.<section>` tags and a production-profile `ansible-lint` clean.
+## 🚀 Quick Start
 
 Targets Entware on KeeneticOS. `ansible_python_interpreter` must point at
 `/opt/bin/python3`, and the role bootstraps that interpreter over `raw` on first
 contact if it is missing.
 
-## Role variables
+```yaml
+- name: keenetic
+  hosts: keenetic
+  ignore_unreachable: true
+  gather_facts: true
+
+  roles:
+    - role: keenetic
+      tags:
+        - keenetic
+```
+
+## ⚙️ Role Variables
 
 | Variable | Description | Example |
 | :--- | :--- | :--- |
@@ -34,7 +45,10 @@ contact if it is missing.
 controller**, without the `.pub` suffix — [tasks/connect.yml](tasks/connect.yml)
 appends it. `id_ed25519` reads `~/.ssh/id_ed25519.pub`.
 
-## Facts set by this role
+## 🔍 Facts Set by This Role
+
+<details>
+<summary><b>All 19 rows</b> — including the two <code>ansible_*</code> connection variables the role rewrites</summary>
 
 | Fact | Description |
 | :--- | :--- |
@@ -58,7 +72,42 @@ appends it. `id_ed25519` reads `~/.ssh/id_ed25519.pub`.
 | `ansible_port` | Rewritten to 22 while bootstrapping, then to `keenetic_ssh_port` once dropbear has moved |
 | `ansible_password` | Rewritten to the stock password when the first connection is refused |
 
-## Notes
+</details>
+
+## 🏷 Tags
+
+| Tag | Purpose |
+| :--- | :--- |
+| `keenetic.cron` | Cron job management |
+| `keenetic.packages` | Base opkg package installation |
+| `keenetic.repo` | Custom opkg repo setup |
+| `keenetic.ssh` | Dropbear config, authorized_keys, ssh port detection/change |
+| `keenetic.user` | Root password and connection bootstrap |
+| `keenetic.xray` | Preflight checks and xray install/config/service state |
+
+`detect.yml` carries all six tags, so any single tag still runs the fact
+gathering it depends on — `preflight.yml` reads `ansible_facts.kernel` for the
+`xt_TPROXY` path, which is why `keenetic.xray` is in that list too.
+
+`connect.yml` carries only `keenetic.ssh` and `keenetic.user`. A `keenetic.cron`,
+`keenetic.packages`, `keenetic.repo` or `keenetic.xray` run therefore does **not**
+re-run the connection bootstrap, and relies on `ansible_port` and the
+credentials in inventory already being correct for the router as it stands.
+That is deliberate: the bootstrap changes the root password and rewrites
+dropbear's config, which no other tag should imply.
+
+`keenetic.xray` additionally requires `keenetic_xray_enabled: true` — the
+`preflight` and `xray` includes are gated on it, so a tagged run against a host
+with it `false` correctly does nothing.
+
+Tags do not discriminate *within* `install.yml`. `Taggable.tags` is
+`extend=True`, so its tasks inherit both of the include's tags on top of their
+own, and `--tags keenetic.packages` and `--tags keenetic.repo` each run the whole
+file. This is the same shape as `flyoverhead.server`'s `packages` include and is
+left alone for consistency with it; the per-task tags there document intent
+rather than gate execution.
+
+## ⚠️ Gotchas
 
 - Stop xray with `keenetic_xray_service_state: stopped`, never a bare
   `S24xray stop`. The service state is written to a flag file that survives
@@ -77,7 +126,8 @@ appends it. `id_ed25519` reads `~/.ssh/id_ed25519.pub`.
   it, which needs **both** `--tags xray.clients,xray.tuning` against the xray
   server host.
 
-## Check mode
+<details>
+<summary><b>Check mode</b> — what <code>--check --diff</code> covers, the six probes that opt out of it, and two things it cannot tell you</summary>
 
 `--check --diff` reports drift in `dropbear.conf`, `authorized_keys`, the opkg
 repo files, the cron jobs, the xray config, the netfilter hook and `S24xray`.
@@ -117,57 +167,12 @@ The preflight assertions do run, so a check against a bootstrapped aarch64
 router is a genuine way to verify the `xt_TPROXY` and port-443 preconditions
 without touching anything.
 
-## Tags
+</details>
 
-| Tag | Purpose |
-| :--- | :--- |
-| `keenetic.cron` | Cron job management |
-| `keenetic.packages` | Base opkg package installation |
-| `keenetic.repo` | Custom opkg repo setup |
-| `keenetic.ssh` | Dropbear config, authorized_keys, ssh port detection/change |
-| `keenetic.user` | Root password and connection bootstrap |
-| `keenetic.xray` | Preflight checks and xray install/config/service state |
-
-`detect.yml` carries all six tags, so any single tag still runs the fact
-gathering it depends on — `preflight.yml` reads `ansible_facts.kernel` for the
-`xt_TPROXY` path, which is why `keenetic.xray` is in that list too.
-
-`connect.yml` carries only `keenetic.ssh` and `keenetic.user`. A `keenetic.cron`,
-`keenetic.packages`, `keenetic.repo` or `keenetic.xray` run therefore does **not**
-re-run the connection bootstrap, and relies on `ansible_port` and the
-credentials in inventory already being correct for the router as it stands.
-That is deliberate: the bootstrap changes the root password and rewrites
-dropbear's config, which no other tag should imply.
-
-`keenetic.xray` additionally requires `keenetic_xray_enabled: true` — the
-`preflight` and `xray` includes are gated on it, so a tagged run against a host
-with it `false` correctly does nothing.
-
-Tags do not discriminate *within* `install.yml`. `Taggable.tags` is
-`extend=True`, so its tasks inherit both of the include's tags on top of their
-own, and `--tags keenetic.packages` and `--tags keenetic.repo` each run the whole
-file. This is the same shape as `flyoverhead.server`'s `packages` include and is
-left alone for consistency with it; the per-task tags there document intent
-rather than gate execution.
-
-## Example playbook
-
-```yaml
-- name: keenetic
-  hosts: keenetic
-  ignore_unreachable: true
-  gather_facts: true
-
-  roles:
-    - role: keenetic
-      tags:
-        - keenetic
-```
-
-## License
+## 📄 License
 
 GPL-3.0-only
 
-## Author Information
+## 👤 Author Information
 
 fLy0v3rH34d
