@@ -32,3 +32,12 @@
   ansible.builtin.command:
     cmd: /opt/etc/init.d/S59tftpd restart
   changed_when: true
+
+# Without this the boot fields live only in the running configuration and are
+# gone after the next reboot or power cut -- network boot then stops working
+# with nothing in the role's output to explain it.
+- name: pxe | save router configuration
+  become: true
+  ansible.builtin.command:
+    cmd: ndmc -c "system configuration save"
+  changed_when: true

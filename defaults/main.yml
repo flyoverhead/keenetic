@@ -117,3 +117,10 @@ keenetic_pxe:
 # carries more than one address.
 keenetic_pxe_next_server: >-
   {{ ansible_facts[keenetic_pxe.lan_iface].ipv4.address | default('') }}
+
+# The KeeneticOS DHCP pool that gets the boot fields. `_WEBADMIN` on a flat
+# config; segmented routers use names like `_WEBADMIN_HOME`. Read the real name
+# out of `ndmc -c "show running-config"` -- the assertion in pxe.yml fails
+# loudly rather than writing into a pool that does not exist. Set to an empty
+# string to have the role leave the router's DHCP configuration alone.
+keenetic_pxe_dhcp_pool: _WEBADMIN

@@ -85,3 +85,66 @@
   when: >-
     (keenetic_pxe_service_state == 'started') !=
     ('tftpd running' in keenetic_pxe_tftpd_status.stdout | default(''))
+
+- name: pxe | configure the router DHCP boot fields
+  when: keenetic_pxe_dhcp_pool | default('') | length > 0
+  block:
+
+    # check_mode: false -- read-only, and a fabricated empty stdout under
+    # --check would make the pool assertion below fail on every dry run.
+    - name: pxe | read the router running configuration
+      ansible.builtin.command:
+        cmd: ndmc -c "show running-config"
+      register: keenetic_pxe_running_config
+      changed_when: false
+      check_mode: false
+
+    # Scoped to the one pool, not a substring search of the whole config: a
+    # segmented router has several pools, and `bootfile ipxe.efi` sitting in the
+    # guest pool would otherwise read as "already configured" and the real pool
+    # would silently never be written.
+    - name: pxe | extract the dhcp pool block
+      ansible.builtin.set_fact:
+        keenetic_pxe_pool_block: >-
+          {{ keenetic_pxe_running_config.stdout |
+          regex_search('(?ms)^ip dhcp pool ' ~ keenetic_pxe_dhcp_pool ~
+          '$.*?^!$') | default('', true) }}
+
+    - name: pxe | require the dhcp pool to exist
+      ansible.builtin.assert:
+        that:
+          - keenetic_pxe_pool_block | length > 0
+        fail_msg: >-
+          No `ip dhcp pool {{ keenetic_pxe_dhcp_pool }}` block in this router's
+          running configuration. The pool is named `_WEBADMIN` on a flat config
+          and something like `_WEBADMIN_HOME` once network segments are in use.
+          Run `ndmc -c "show running-config"` on the router, find the real name,
+          and set keenetic_pxe_dhcp_pool for this host. Writing into a
+          non-existent pool would be accepted by ndmc and quietly do nothing.
+
+    # next-server and bootfile are the BOOTP siaddr/file header fields, and they
+    # are the ones that actually work: a large share of PXE option ROMs read
+    # those and ignore option 66 entirely. Options 66/67 are set as well, for
+    # the ROMs that do the reverse. KeeneticOS populates only what it is asked
+    # for -- unlike most DHCP servers, it does not mirror one into the other.
+    - name: pxe | set the dhcp boot fields
+      ansible.builtin.command:
+        cmd: >-
+          ndmc -c "ip dhcp pool {{ keenetic_pxe_dhcp_pool }}
+          {{ item.verb }} {{ item.value }}"
+      loop:
+        - verb: next-server
+          value: '{{ keenetic_pxe_next_server }}'
+        - verb: bootfile
+          value: '{{ keenetic_pxe.bootfile }}'
+        - verb: option 66 ascii
+          value: '{{ keenetic_pxe_next_server }}'
+        - verb: option 67 ascii
+          value: '{{ keenetic_pxe.bootfile }}'
+      loop_control:
+        label: '{{ item.verb }}'
+      when: >-
+        (item.verb ~ ' ' ~ item.value) not in keenetic_pxe_pool_block
+      changed_when: true
+      notify:
+        - pxe | save router configuration

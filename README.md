@@ -44,6 +44,7 @@ contact if it is missing.
 | `keenetic_pxe_service_state` | `started` \| `stopped` — whether the PXE daemons should be running, distinct from `keenetic_pxe_enabled` | `started` |
 | `keenetic_pxe` | Paths, LAN interface, HTTP port, bootfile name and the optional tftpd remap file | Definition example in [defaults/main.yml](defaults/main.yml) |
 | `keenetic_pxe_next_server` | Address handed to clients and bound by both daemons; defaults to the `keenetic_pxe.lan_iface` address | `192.168.1.1` |
+| `keenetic_pxe_dhcp_pool` | KeeneticOS DHCP pool that receives the boot fields; empty string leaves the router's DHCP configuration untouched | `_WEBADMIN` |
 
 `keenetic_user.authorized_ssh_keys` names public keys under `~/.ssh` **on the
 controller**, without the `.pub` suffix — [tasks/connect.yml](tasks/connect.yml)
@@ -73,6 +74,9 @@ appends it. `id_ed25519` reads `~/.ssh/id_ed25519.pub`.
 | `keenetic_xray_stage` / `keenetic_xray_download` | Controller-side staging directory and release download |
 | `keenetic_xray_profile` | Whether `keenetic_xray_config_src` has been generated yet |
 | `keenetic_xray_status` | `S24xray status` output, compared against `keenetic_xray_service_state` |
+| `keenetic_pxe_running_config` | `ndmc -c "show running-config"` output, the boot fields are diffed against it |
+| `keenetic_pxe_pool_block` | The single `ip dhcp pool` block extracted from the above, so a sibling pool's settings cannot be mistaken for this one's |
+| `keenetic_pxe_tftpd_status` | `S59tftpd status` output, compared against `keenetic_pxe_service_state` |
 | `ansible_port` | Rewritten to 22 while bootstrapping, then to `keenetic_ssh_port` once dropbear has moved |
 | `ansible_password` | Rewritten to the stock password when the first connection is refused |
 
@@ -130,6 +134,12 @@ rather than gate execution.
   `keenetic_xray_config_src` exists and tells you the exact command to generate
   it, which needs **both** `--tags xray.clients,xray.tuning` against the xray
   server host.
+- `pxe.yml`'s DHCP boot-field write is only as idempotent as `ndmc`'s own
+  rendering. It compares each `next-server`/`bootfile`/option 66/option 67
+  value against `show running-config` assuming that output is unquoted and
+  sits directly after the verb (`option 66 ascii 192.168.1.1`); if a firmware
+  version quotes option values instead, those two loop items will report
+  `changed` on every run even though the router already has them set.
 
 <details>
 <summary><b>Check mode</b> — what <code>--check --diff</code> covers, the six probes that opt out of it, and two things it cannot tell you</summary>
