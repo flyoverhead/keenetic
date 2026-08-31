@@ -80,3 +80,40 @@ keenetic_cron_jobs: []
   #   hour: 5
   #   minute: 30
   #   job: /opt/etc/init.d/S24xray update-geofiles
+
+keenetic_pxe_enabled: false
+
+# started | stopped -- whether the PXE daemons run, as distinct from
+# keenetic_pxe_enabled, which is whether the role manages them at all. Same
+# split as keenetic_xray_service_state, and for the same reason: `stopped`
+# writes a flag the init scripts honour, so a deliberate stop survives a reboot
+# and a later deploy rather than being undone by the boot auto-start.
+keenetic_pxe_service_state: started
+
+keenetic_pxe:
+  # /opt is the external drive. The TFTP root and the image root live there
+  # because the router's own rootfs is a small read-only squashfs.
+  tftp_root: /opt/srv/tftp
+  http_root: /opt/srv/http
+  conf_dir: /opt/etc/pxe
+  lan_iface: br0
+  # Not 80: the KeeneticOS web UI holds it. Not 8080 blindly either -- check
+  # nothing else on the router has taken it before overriding.
+  http_port: 8081
+  # What the router's DHCP pool hands out as the BOOTP `file` field. UEFI x64 by
+  # default; KeeneticOS serves one bootfile per pool and cannot reliably split
+  # BIOS from UEFI, so legacy clients need this repointed at undionly.kpxe.
+  bootfile: ipxe.efi
+  # tftpd-hpa's -m map file. Empty by default: the only thing it is needed for
+  # is Windows/WDS boot, which requests paths with backslashes and mixed case.
+  # Left as a hook rather than removed, because it is the single capability
+  # dnsmasq's built-in TFTP server cannot provide.
+  remap_file: ''
+  log_file: /opt/var/log/pxe-httpd.log
+
+# The address clients are told to fetch the loader from, and the address both
+# daemons bind. Derived from the LAN bridge rather than hardcoded so a router on
+# a non-default subnet works untouched. Override with a literal if the bridge
+# carries more than one address.
+keenetic_pxe_next_server: >-
+  {{ ansible_facts[keenetic_pxe.lan_iface].ipv4.address | default('') }}

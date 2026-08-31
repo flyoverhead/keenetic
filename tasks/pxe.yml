@@ -1,0 +1,87 @@
+---
+
+- name: pxe | require a valid service state
+  ansible.builtin.assert:
+    that:
+      - keenetic_pxe_service_state in ['started', 'stopped']
+    fail_msg: >-
+      keenetic_pxe_service_state must be 'started' or 'stopped', got
+      {{ keenetic_pxe_service_state | default('undefined') }}. A typo would
+      otherwise be read as "not started" and silently disable network boot.
+
+- name: pxe | require a LAN address to advertise
+  ansible.builtin.assert:
+    that:
+      - keenetic_pxe_next_server | default('') | length > 0
+      - keenetic_pxe_next_server is match('^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    fail_msg: >-
+      keenetic_pxe_next_server resolved to
+      '{{ keenetic_pxe_next_server | default("undefined") }}', not an IPv4
+      address. It defaults to the address of
+      {{ keenetic_pxe.lan_iface }}, so either that bridge is named differently
+      on this router or facts were not gathered. Set keenetic_pxe_next_server
+      to a literal address for this host.
+
+- name: pxe | install packages
+  community.general.opkg:
+    name:
+      - tftpd-hpa
+    state: present
+
+- name: pxe | create directories
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - '{{ keenetic_pxe.conf_dir }}'
+    - '{{ keenetic_pxe.tftp_root }}'
+
+- name: pxe | install the tftpd init script
+  ansible.builtin.template:
+    src: S59tftpd.j2
+    dest: /opt/etc/init.d/S59tftpd
+    owner: root
+    group: root
+    mode: '0755'
+    validate: sh -n %s
+  notify:
+    - pxe | restart tftpd
+
+# Ordering matters, as it does for xray: after the init script, so the script
+# honouring this flag is in place, and before main.yml's flush_handlers, so a
+# restart notified above also sees it. Otherwise a deploy restarts a daemon that
+# was stopped on purpose.
+- name: pxe | set the administrative service state
+  ansible.builtin.file:
+    path: '{{ keenetic_pxe.conf_dir }}/disabled'
+    state: '{{ "absent" if keenetic_pxe_service_state == "started" else "touch" }}'
+    owner: root
+    group: root
+    mode: '0644'
+  # `touch` always reports changed; only absent->present is a real change, and
+  # the flag's content is never read.
+  changed_when: false
+
+# check_mode: false -- command has no check mode, so --check fabricates empty
+# stdout, which reads as "not running" and would make the converge task below
+# claim a change on every dry run. Read-only.
+- name: pxe | read the current tftpd state
+  ansible.builtin.command:
+    cmd: /opt/etc/init.d/S59tftpd status
+  register: keenetic_pxe_tftpd_status
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: pxe | converge tftpd to its declared state
+  ansible.builtin.command:
+    cmd: >-
+      /opt/etc/init.d/S59tftpd
+      {{ 'start' if keenetic_pxe_service_state == 'started' else 'stop' }}
+  changed_when: true
+  when: >-
+    (keenetic_pxe_service_state == 'started') !=
+    ('tftpd running' in keenetic_pxe_tftpd_status.stdout | default(''))

@@ -40,6 +40,10 @@ contact if it is missing.
 | `keenetic_xray` | Paths, TProxy port, fwmark, routing table, LAN interface, log file, corp dummy range and download URL | Definition example in [defaults/main.yml](defaults/main.yml) |
 | `keenetic_xray_config_src` | Path on the controller to the rendered client profile copied to the router | `{{ inventory_dir }}/files/clients/{{ keenetic_xray_server_name }}-{{ inventory_hostname }}.json` |
 | `keenetic_xray_server_name` | Name of the xray server host this router's client profile was generated against | `my-vps` |
+| `keenetic_pxe_enabled` | Whether this role manages the PXE daemons at all | `false` |
+| `keenetic_pxe_service_state` | `started` \| `stopped` — whether the PXE daemons should be running, distinct from `keenetic_pxe_enabled` | `started` |
+| `keenetic_pxe` | Paths, LAN interface, HTTP port, bootfile name and the optional tftpd remap file | Definition example in [defaults/main.yml](defaults/main.yml) |
+| `keenetic_pxe_next_server` | Address handed to clients and bound by both daemons; defaults to the `keenetic_pxe.lan_iface` address | `192.168.1.1` |
 
 `keenetic_user.authorized_ssh_keys` names public keys under `~/.ssh` **on the
 controller**, without the `.pub` suffix — [tasks/connect.yml](tasks/connect.yml)
@@ -84,8 +88,9 @@ appends it. `id_ed25519` reads `~/.ssh/id_ed25519.pub`.
 | `keenetic.ssh` | Dropbear config, authorized_keys, ssh port detection/change |
 | `keenetic.user` | Root password and connection bootstrap |
 | `keenetic.xray` | Preflight checks and xray install/config/service state |
+| `keenetic.pxe` | TFTP and HTTP boot services, and the router's DHCP boot fields |
 
-`detect.yml` carries all six tags, so any single tag still runs the fact
+`detect.yml` carries all seven tags, so any single tag still runs the fact
 gathering it depends on — `preflight.yml` reads `ansible_facts.kernel` for the
 `xt_TPROXY` path, which is why `keenetic.xray` is in that list too.
 

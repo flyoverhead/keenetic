@@ -1,0 +1,112 @@
+#!/bin/sh
+# tftpd-hpa service for Entware on KeeneticOS. MANAGED BY ANSIBLE -- DO NOT EDIT.
+#
+# Hand-written rather than an rc.func wrapper, as S24xray is: the tftpd-hpa
+# package ships nothing but /opt/sbin/tftpd-hpa -- no init script, no config --
+# so there is nothing to wrap, and rc.func's ENABLED flag lives in the script
+# itself, which an opkg upgrade would reset.
+
+PATH=/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+BIN=/opt/sbin/tftpd-hpa
+ROOT={{ keenetic_pxe.tftp_root }}
+# Bound to the LAN address, never 0.0.0.0. TFTP is unauthenticated and read-only
+# here, but there is no reason for it to answer on the WAN side even behind the
+# firewall.
+ADDRESS={{ keenetic_pxe_next_server }}:69
+# Administrative "stay stopped" marker, from keenetic_pxe_service_state. `stop`
+# alone cannot express intent: a stopped daemon is indistinguishable from one
+# not yet started, so the boot auto-start and the deploy handler would each undo
+# a deliberate stop.
+DISABLED={{ keenetic_pxe.conf_dir }}/disabled
+PIDFILE=/var/run/tftpd-hpa.pid
+{% if keenetic_pxe.remap_file %}
+REMAP="-m {{ keenetic_pxe.remap_file }}"
+{% else %}
+REMAP=""
+{% endif %}
+
+log() { logger -t tftpd "$*"; }
+
+running() {
+    [ -f "${PIDFILE}" ] || return 1
+    kill -0 "$(cat "${PIDFILE}")" 2>/dev/null
+}
+
+start() {
+    if [ -f "${DISABLED}" ]; then
+        log "start refused: ${DISABLED} exists"
+        echo "tftpd is administratively disabled (${DISABLED}); not starting"
+        return 0
+    fi
+
+    if running; then
+        echo "tftpd already running (pid $(cat "${PIDFILE}"))"
+        return 0
+    fi
+
+    [ -x "${BIN}" ] || { log "missing binary ${BIN}"; return 1; }
+    # --secure chroots into ROOT, so a missing root is a hard failure rather
+    # than a daemon quietly serving nothing. ROOT is on the external drive: this
+    # is the unplugged-USB case, and it should be loud.
+    [ -d "${ROOT}" ] || { log "missing tftp root ${ROOT}"; return 1; }
+
+    # --user root because tftpd-hpa defaults to "nobody", which is not
+    # guaranteed to exist on KeeneticOS. --secure chroots and, with no -c, the
+    # daemon is read-only. --foreground so this script owns the pid: tftpd-hpa
+    # writes no pidfile of its own.
+    #
+    # trap '' HUP before exec reimplements nohup, which busybox here does not
+    # build -- without it, sshd signalling the process group when the ansible
+    # handler's channel closes kills the daemon right after a "successful"
+    # deploy. Same mechanism as S24xray.
+    # shellcheck disable=SC2086
+    ( trap '' HUP; exec "${BIN}" --listen --foreground --secure --user root \
+        --address "${ADDRESS}" ${REMAP} "${ROOT}" >/dev/null 2>&1 ) &
+    echo $! > "${PIDFILE}"
+    sleep 1
+
+    if ! running; then
+        log "tftpd failed to stay up"
+        rm -f "${PIDFILE}"
+        return 1
+    fi
+
+    log "started (pid $(cat "${PIDFILE}"))"
+    echo "tftpd started"
+}
+
+stop() {
+    if running; then
+        pid=$(cat "${PIDFILE}")
+        kill "${pid}" 2>/dev/null
+        i=0
+        while kill -0 "${pid}" 2>/dev/null && [ "${i}" -lt 10 ]; do
+            i=$((i + 1))
+            sleep 1
+        done
+        kill -9 "${pid}" 2>/dev/null
+    else
+        killall tftpd-hpa 2>/dev/null
+    fi
+    rm -f "${PIDFILE}"
+    log "stopped"
+    echo "tftpd stopped"
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; start ;;
+    status)
+        if running; then
+            echo "tftpd running (pid $(cat "${PIDFILE}"))"
+        else
+            echo "tftpd stopped"
+        fi
+        ;;
+    *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac
+# No trailing `exit 0`: it would mask start's exit status and always report
+# success to the ansible handler. Same reasoning as S24xray.

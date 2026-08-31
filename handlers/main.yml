@@ -26,3 +26,9 @@
   ansible.builtin.command:
     cmd: /opt/etc/init.d/S24xray restart
   changed_when: true
+
+- name: pxe | restart tftpd
+  become: true
+  ansible.builtin.command:
+    cmd: /opt/etc/init.d/S59tftpd restart
+  changed_when: true
