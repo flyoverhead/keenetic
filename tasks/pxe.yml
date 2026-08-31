@@ -103,12 +103,18 @@
     # segmented router has several pools, and `bootfile ipxe.efi` sitting in the
     # guest pool would otherwise read as "already configured" and the real pool
     # would silently never be written.
+    #
+    # The closing boundary accepts a `!` line OR end-of-buffer (\Z): when the
+    # target pool is the last stanza in `show running-config`, there is no
+    # trailing `!` for the non-greedy `.*?` to anchor on, and a boundary that
+    # only accepted `!` would return no match at all -- failing the assertion
+    # below on a router that is already configured correctly.
     - name: pxe | extract the dhcp pool block
       ansible.builtin.set_fact:
         keenetic_pxe_pool_block: >-
           {{ keenetic_pxe_running_config.stdout |
           regex_search('(?ms)^ip dhcp pool ' ~ keenetic_pxe_dhcp_pool ~
-          '$.*?^!$') | default('', true) }}
+          '$.*?(?:^!$|\Z)') | default('', true) }}
 
     - name: pxe | require the dhcp pool to exist
       ansible.builtin.assert:
