@@ -47,6 +47,7 @@ contact if it is missing.
 | `keenetic_pxe_dhcp_pool` | KeeneticOS DHCP pool that receives the boot fields; empty string leaves the router's DHCP configuration untouched | `_WEBADMIN` |
 | `keenetic_pxe_loaders` | iPXE binaries staged into the TFTP root: `name`, `url`, optional `checksum` | Definition example in [defaults/main.yml](defaults/main.yml) |
 | `keenetic_pxe_menu` | Boot menu entries rendered into `autoexec.ipxe`: `id`, `label`, `key`, `kernel`, `initrd`, optional `args` | Definition example in [defaults/main.yml](defaults/main.yml) |
+| `keenetic_pxe_images` | Boot payloads staged into `keenetic_pxe.http_root`: `name` (may nest), `url`, `checksum` | Definition example in [defaults/main.yml](defaults/main.yml) |
 
 `keenetic_user.authorized_ssh_keys` names public keys under `~/.ssh` **on the
 controller**, without the `.pub` suffix — [tasks/connect.yml](tasks/connect.yml)
@@ -55,7 +56,7 @@ appends it. `id_ed25519` reads `~/.ssh/id_ed25519.pub`.
 ## 🔍 Facts Set by This Role
 
 <details>
-<summary><b>All 20 rows</b> — including the two <code>ansible_*</code> connection variables the role rewrites</summary>
+<summary><b>All 22 rows</b> — including the two <code>ansible_*</code> connection variables the role rewrites</summary>
 
 | Fact | Description |
 | :--- | :--- |
@@ -80,6 +81,8 @@ appends it. `id_ed25519` reads `~/.ssh/id_ed25519.pub`.
 | `keenetic_pxe_pool_block` | The single `ip dhcp pool` block extracted from the above, so a sibling pool's settings cannot be mistaken for this one's |
 | `keenetic_pxe_tftpd_status` | `S59tftpd status` output, compared against `keenetic_pxe_service_state` |
 | `keenetic_pxe_loader_download` | Result of the iPXE loader downloads, used for its `until` retry |
+| `keenetic_pxe_httpd_status` | `S82pxehttpd status` output, compared against `keenetic_pxe_service_state` |
+| `keenetic_pxe_image_download` | Result of the boot image downloads, used for its `until` retry |
 | `ansible_port` | Rewritten to 22 while bootstrapping, then to `keenetic_ssh_port` once dropbear has moved |
 | `ansible_password` | Rewritten to the stock password when the first connection is refused |
 

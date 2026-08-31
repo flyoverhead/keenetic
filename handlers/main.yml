@@ -41,3 +41,19 @@
   ansible.builtin.command:
     cmd: ndmc -c "system configuration save"
   changed_when: true
+
+# Notified only when the ENABLED= line actually flips, so a router where the
+# stock instance was never running (or already disabled) is not made to run an
+# unnecessary stop command. failed_when: false because it may not be running.
+- name: pxe | stop the packaged lighttpd
+  become: true
+  ansible.builtin.command:
+    cmd: /opt/etc/init.d/S80lighttpd stop
+  changed_when: true
+  failed_when: false
+
+- name: pxe | restart httpd
+  become: true
+  ansible.builtin.command:
+    cmd: /opt/etc/init.d/S82pxehttpd restart
+  changed_when: true

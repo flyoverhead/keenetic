@@ -1,0 +1,97 @@
+#!/bin/sh
+# PXE image HTTP service for Entware on KeeneticOS. MANAGED BY ANSIBLE -- DO NOT EDIT.
+#
+# A second lighttpd instance, separate from the package's S80lighttpd, which the
+# role disables: the stock init script is ENABLED=yes and its config sets no
+# server.port, so it binds :80 and collides with the router web UI.
+#
+# Unlike S59tftpd this does not background the daemon itself -- lighttpd
+# daemonises and writes its own pidfile, named in the config above.
+
+PATH=/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+BIN=/opt/sbin/lighttpd
+CONF={{ keenetic_pxe.conf_dir }}/httpd.conf
+ROOT={{ keenetic_pxe.http_root }}
+# Shared with S59tftpd: one keenetic_pxe_service_state governs both daemons, so
+# they cannot drift into a half-running state where clients get a loader but no
+# images.
+DISABLED={{ keenetic_pxe.conf_dir }}/disabled
+PIDFILE=/var/run/pxe-httpd.pid
+LOGFILE={{ keenetic_pxe.log_file }}
+
+log() { logger -t pxe-httpd "$*"; }
+
+running() {
+    [ -f "${PIDFILE}" ] || return 1
+    kill -0 "$(cat "${PIDFILE}")" 2>/dev/null
+}
+
+start() {
+    if [ -f "${DISABLED}" ]; then
+        log "start refused: ${DISABLED} exists"
+        echo "pxe httpd is administratively disabled (${DISABLED}); not starting"
+        return 0
+    fi
+
+    if running; then
+        echo "httpd already running (pid $(cat "${PIDFILE}"))"
+        return 0
+    fi
+
+    [ -x "${BIN}" ] || { log "missing binary ${BIN}"; return 1; }
+    [ -f "${CONF}" ] || { log "missing config ${CONF}"; return 1; }
+    [ -d "${ROOT}" ] || { log "missing document root ${ROOT}"; return 1; }
+
+    # -tt parses the config and exits. Without it a bad port or a missing
+    # include leaves lighttpd dead with the failure only in syslog, and this
+    # script would report a successful start.
+    if ! "${BIN}" -tt -f "${CONF}" >/dev/null 2>&1; then
+        log "config test failed, refusing to start"
+        "${BIN}" -tt -f "${CONF}"
+        return 1
+    fi
+
+    mkdir -p "$(dirname "${LOGFILE}")" 2>/dev/null
+    "${BIN}" -f "${CONF}"
+    sleep 1
+
+    if ! running; then
+        log "httpd failed to stay up"
+        return 1
+    fi
+
+    log "started (pid $(cat "${PIDFILE}"))"
+    echo "httpd started"
+}
+
+stop() {
+    if running; then
+        pid=$(cat "${PIDFILE}")
+        kill "${pid}" 2>/dev/null
+        i=0
+        while kill -0 "${pid}" 2>/dev/null && [ "${i}" -lt 10 ]; do
+            i=$((i + 1))
+            sleep 1
+        done
+        kill -9 "${pid}" 2>/dev/null
+    fi
+    rm -f "${PIDFILE}"
+    log "stopped"
+    echo "httpd stopped"
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; start ;;
+    status)
+        if running; then
+            echo "httpd running (pid $(cat "${PIDFILE}"))"
+        else
+            echo "httpd stopped"
+        fi
+        ;;
+    *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

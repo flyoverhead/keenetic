@@ -147,3 +147,16 @@ keenetic_pxe_menu: []
   #   kernel: debian-12/linux
   #   initrd: debian-12/initrd.gz
   #   args: 'vga=788 --- quiet'
+
+# Boot payloads staged into keenetic_pxe.http_root and referenced by
+# keenetic_pxe_menu. Downloaded by the router over its own WAN link, not
+# proxied through the controller -- these are large files and /opt is where
+# they land. `name` may contain slashes to nest them, e.g. debian-12/linux.
+#
+# Give every entry a checksum: distributions rebuild netboot artefacts in place
+# under the same URL, and a silently updated kernel beside a stale initrd fails
+# at boot in a way that looks like a network problem.
+keenetic_pxe_images: []
+  # - name: debian-12/linux
+  #   url: https://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/debian-installer/amd64/linux
+  #   checksum: sha256:0000000000000000000000000000000000000000000000000000000000000000

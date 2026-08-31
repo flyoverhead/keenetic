@@ -181,3 +181,101 @@
     owner: root
     group: root
     mode: '0644'
+
+- name: pxe | install the http server package
+  community.general.opkg:
+    name:
+      - lighttpd
+    state: present
+
+# The package ships S80lighttpd with ENABLED=yes and a config that sets no
+# server.port, so a stock instance binds :80 and fights the KeeneticOS web UI.
+# Disabling it here rather than removing the file: opkg owns it, and a removal
+# would come back on the next upgrade with ENABLED=yes again.
+- name: pxe | disable the packaged lighttpd instance
+  ansible.builtin.lineinfile:
+    path: /opt/etc/init.d/S80lighttpd
+    regexp: ^ENABLED=
+    line: ENABLED=no
+    owner: root
+    group: root
+    mode: '0755'
+  notify:
+    - pxe | stop the packaged lighttpd
+
+- name: pxe | create the image directory
+  ansible.builtin.file:
+    path: '{{ keenetic_pxe.http_root }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: pxe | install the http server config
+  ansible.builtin.template:
+    src: pxe-httpd.conf.j2
+    dest: '{{ keenetic_pxe.conf_dir }}/httpd.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - pxe | restart httpd
+
+- name: pxe | install the http server init script
+  ansible.builtin.template:
+    src: S82pxehttpd.j2
+    dest: /opt/etc/init.d/S82pxehttpd
+    owner: root
+    group: root
+    mode: '0755'
+    validate: sh -n %s
+  notify:
+    - pxe | restart httpd
+
+# get_url writes straight into a nested path, so the parent directory needs to
+# exist first for any keenetic_pxe_images entry whose name contains a slash.
+- name: pxe | create the image subdirectories
+  ansible.builtin.file:
+    path: '{{ keenetic_pxe.http_root }}/{{ item.name | dirname }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop: '{{ keenetic_pxe_images }}'
+  loop_control:
+    label: '{{ item.name }}'
+  when: item.name is search('/')
+
+- name: pxe | stage the boot images
+  ansible.builtin.get_url:
+    url: '{{ item.url }}'
+    dest: '{{ keenetic_pxe.http_root }}/{{ item.name }}'
+    checksum: '{{ item.checksum | default(omit) }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: '{{ keenetic_pxe_images }}'
+  loop_control:
+    label: '{{ item.name }}'
+  register: keenetic_pxe_image_download
+  until: keenetic_pxe_image_download is succeeded
+  retries: 3
+
+# check_mode: false for the same reason as the tftpd read above.
+- name: pxe | read the current httpd state
+  ansible.builtin.command:
+    cmd: /opt/etc/init.d/S82pxehttpd status
+  register: keenetic_pxe_httpd_status
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: pxe | converge httpd to its declared state
+  ansible.builtin.command:
+    cmd: >-
+      /opt/etc/init.d/S82pxehttpd
+      {{ 'start' if keenetic_pxe_service_state == 'started' else 'stop' }}
+  changed_when: true
+  when: >-
+    (keenetic_pxe_service_state == 'started') !=
+    ('httpd running' in keenetic_pxe_httpd_status.stdout | default(''))

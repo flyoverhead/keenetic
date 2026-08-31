@@ -1,0 +1,25 @@
+# {{ ansible_managed }}
+#
+# A role-owned lighttpd instance, deliberately NOT /opt/etc/lighttpd/lighttpd.conf:
+# that path is owned by the lighttpd package and an opkg upgrade would restore
+# the stock file, which sets no server.port and therefore binds :80 -- the
+# KeeneticOS web UI's port.
+
+server.document-root        = "{{ keenetic_pxe.http_root }}"
+server.bind                 = "{{ keenetic_pxe_next_server }}"
+server.port                 = {{ keenetic_pxe.http_port }}
+server.pid-file             = "/var/run/pxe-httpd.pid"
+server.errorlog             = "{{ keenetic_pxe.log_file }}"
+server.modules              = ( "mod_dirlisting" )
+
+# Directory listings are for debugging: "is the image actually on the router"
+# is the first question every failed boot raises, and answering it from a
+# browser beats an ssh session.
+dir-listing.activate        = "enable"
+index-file.names            = ( "index.html" )
+
+include "/opt/etc/lighttpd/mime.conf"
+
+# Anything the mime map does not recognise -- kernels, initrds, squashfs images
+# -- is served as a byte stream rather than guessed at.
+mimetype.assign            += ( "" => "application/octet-stream" )
