@@ -154,3 +154,30 @@
       changed_when: true
       notify:
         - pxe | save router configuration
+
+# No notify on either task below: tftpd-hpa reads files from disk on every
+# request rather than holding them in memory, so a new loader or menu is live
+# for the very next client without a restart, and restarting would only risk
+# interrupting a transfer already in flight.
+- name: pxe | stage the ipxe loaders
+  ansible.builtin.get_url:
+    url: '{{ item.url }}'
+    dest: '{{ keenetic_pxe.tftp_root }}/{{ item.name }}'
+    checksum: '{{ item.checksum | default(omit) }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: '{{ keenetic_pxe_loaders }}'
+  loop_control:
+    label: '{{ item.name }}'
+  register: keenetic_pxe_loader_download
+  until: keenetic_pxe_loader_download is succeeded
+  retries: 3
+
+- name: pxe | install the ipxe boot menu
+  ansible.builtin.template:
+    src: autoexec.ipxe.j2
+    dest: '{{ keenetic_pxe.tftp_root }}/autoexec.ipxe'
+    owner: root
+    group: root
+    mode: '0644'

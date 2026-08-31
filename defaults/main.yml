@@ -124,3 +124,26 @@ keenetic_pxe_next_server: >-
 # loudly rather than writing into a pool that does not exist. Set to an empty
 # string to have the role leave the router's DHCP configuration alone.
 keenetic_pxe_dhcp_pool: _WEBADMIN
+
+# Loaders staged into the TFTP root. ipxe.efi is what keenetic_pxe.bootfile
+# points at by default; undionly.kpxe is staged alongside so a legacy-BIOS
+# client can be served by repointing the bootfile, without a second deploy.
+#
+# boot.ipxe.org publishes no stable checksums -- upstream rebuilds the binaries
+# in place -- so `checksum` is optional per entry. Set it if you mirror the
+# files somewhere you control.
+keenetic_pxe_loaders:
+  - name: ipxe.efi
+    url: https://boot.ipxe.org/ipxe.efi
+  - name: undionly.kpxe
+    url: https://boot.ipxe.org/undionly.kpxe
+
+# Entries rendered into autoexec.ipxe. `kernel` and `initrd` are paths relative
+# to keenetic_pxe.http_root; the menu prefixes them with the HTTP base URL.
+keenetic_pxe_menu: []
+  # - id: debian
+  #   label: Debian 12 netinstall
+  #   key: d
+  #   kernel: debian-12/linux
+  #   initrd: debian-12/initrd.gz
+  #   args: 'vga=788 --- quiet'

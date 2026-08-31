@@ -1,0 +1,44 @@
+#!ipxe
+# MANAGED BY ANSIBLE -- DO NOT EDIT.
+#
+# iPXE fetches autoexec.ipxe from the TFTP server it booted from, before falling
+# back to a fresh DHCP request. That is what breaks the chainload loop: without
+# it, the DHCP pool hands out ipxe.efi, iPXE re-requests DHCP, and is handed
+# ipxe.efi again, forever. No custom-built binary needed.
+
+set base http://{{ keenetic_pxe_next_server }}:{{ keenetic_pxe.http_port }}
+set timeout 30000
+
+:start
+menu Network boot -- {{ inventory_hostname }}
+{% for entry in keenetic_pxe_menu %}
+item --key {{ entry.key }} {{ entry.id }} {{ entry.label }}
+{% endfor %}
+item --gap
+item shell iPXE shell
+item local Boot from local disk
+choose --default local --timeout ${timeout} target || goto local
+goto ${target}
+
+{% for entry in keenetic_pxe_menu %}
+:{{ entry.id }}
+kernel ${base}/{{ entry.kernel }}{% if entry.args is defined and entry.args %} {{ entry.args }}{% endif %}
+
+initrd ${base}/{{ entry.initrd }}
+boot || goto failed
+
+{% endfor %}
+:shell
+shell
+goto start
+
+:local
+# Hands control back to the next BIOS/UEFI boot device. `exit 1` rather than
+# `exit`: exit 0 tells the firmware the boot succeeded and some implementations
+# then stop trying anything else.
+exit 1
+
+:failed
+echo Boot failed, returning to the menu in 5 seconds
+sleep 5
+goto start
