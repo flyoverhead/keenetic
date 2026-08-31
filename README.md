@@ -56,7 +56,7 @@ appends it. `id_ed25519` reads `~/.ssh/id_ed25519.pub`.
 ## 🔍 Facts Set by This Role
 
 <details>
-<summary><b>All 22 rows</b> — including the two <code>ansible_*</code> connection variables the role rewrites</summary>
+<summary><b>All 25 rows</b> — including the two <code>ansible_*</code> connection variables the role rewrites</summary>
 
 | Fact | Description |
 | :--- | :--- |
@@ -105,9 +105,10 @@ gathering it depends on — `preflight.yml` reads `ansible_facts.kernel` for the
 `xt_TPROXY` path, which is why `keenetic.xray` is in that list too.
 
 `connect.yml` carries only `keenetic.ssh` and `keenetic.user`. A `keenetic.cron`,
-`keenetic.packages`, `keenetic.repo` or `keenetic.xray` run therefore does **not**
-re-run the connection bootstrap, and relies on `ansible_port` and the
-credentials in inventory already being correct for the router as it stands.
+`keenetic.packages`, `keenetic.repo`, `keenetic.xray` or `keenetic.pxe` run
+therefore does **not** re-run the connection bootstrap, and relies on
+`ansible_port` and the credentials in inventory already being correct for the
+router as it stands.
 That is deliberate: the bootstrap changes the root password and rewrites
 dropbear's config, which no other tag should imply.
 
@@ -140,6 +141,41 @@ rather than gate execution.
   `keenetic_xray_config_src` exists and tells you the exact command to generate
   it, which needs **both** `--tags xray.clients,xray.tuning` against the xray
   server host.
+- Stop the PXE daemons with `keenetic_pxe_service_state: stopped`, never a bare
+  `S59tftpd stop`. Both init scripts read one flag file under
+  `keenetic_pxe.conf_dir`; stopping either out-of-band leaves that flag out of
+  sync and the next deploy or reboot brings the daemon back.
+- `dnsmasq-full` is in `keenetic_packages` on every host, it ships
+  `/opt/etc/init.d/S56dnsmasq` with `ENABLED=yes`, and its packaged
+  `dnsmasq.conf` is entirely comments -- so a running instance answers DNS on
+  :53 beside `ndnsproxy`. This role does not manage it. Check
+  `/opt/etc/init.d/S56dnsmasq check` before assuming the router's DNS path is
+  what you think it is, and do not build PXE on that daemon: without `port=0`
+  and with any `dhcp-range`, it competes with the router's own DHCP server for
+  the whole LAN.
+- The `lighttpd` package likewise ships `S80lighttpd` with `ENABLED=yes` and a
+  config that sets no `server.port`, so a stock instance binds :80 -- the web
+  UI's port. `pxe.yml` sets `ENABLED=no` there and runs its own instance from
+  `keenetic_pxe.conf_dir/httpd.conf`. Do not re-enable it.
+- `next-server` and `bootfile` are the fields that make network boot work, not
+  options 66/67. Many PXE option ROMs read the BOOTP `siaddr`/`file` header
+  fields and ignore option 66 entirely, and KeeneticOS populates only what it is
+  asked for. The role sets all four.
+- Router CLI changes made through `ndmc` live in the running configuration only.
+  The `pxe | save router configuration` handler runs
+  `system configuration save`; if it is skipped, the boot fields survive until
+  the next reboot and then silently vanish.
+- One `bootfile` per DHCP pool means one client architecture. The default is
+  UEFI x64 (`ipxe.efi`). `undionly.kpxe` is staged alongside it, but serving
+  both from one pool needs DHCP class matching on option 60, which is untested
+  on KeeneticOS.
+- TFTP and the image HTTP server bind `keenetic_pxe_next_server`, which defaults
+  to the `br0` address. Neither is authenticated. On a router whose LAN bridge
+  carries more than one address, set the variable explicitly rather than letting
+  it pick.
+- Both roots live under `/opt`, the external drive. An unplugged stick means
+  `S59tftpd` and `S82pxehttpd` refuse to start rather than serving an empty
+  tree -- deliberately loud.
 - `pxe.yml`'s DHCP boot-field write is only as idempotent as `ndmc`'s own
   rendering. It compares each `next-server`/`bootfile`/option 66/option 67
   value against `show running-config` assuming that output is unquoted and

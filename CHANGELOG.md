@@ -2,6 +2,37 @@
 
 All notable changes to `keenetic`.
 
+## 1.1.0
+
+### Added
+
+- **Network boot** (`pxe.yml`), opt-in via `keenetic_pxe_enabled`. A
+  role-managed `tftpd-hpa` serving `keenetic_pxe.tftp_root` and a role-managed
+  `lighttpd` serving `keenetic_pxe.http_root`, both bound to the LAN address and
+  both hand-written self-contained init scripts rather than `rc.func` wrappers
+  -- `tftpd-hpa` ships no init script at all, and the `lighttpd` package's is
+  `ENABLED=yes` on port 80, which collides with the web UI. The packaged
+  `S80lighttpd` is disabled rather than removed, because opkg owns the file.
+- **Router DHCP boot fields.** `next-server` and `bootfile` written into
+  `keenetic_pxe_dhcp_pool` over `ndmc`, alongside options 66/67. Both are set
+  because PXE option ROMs are split on which they read, and KeeneticOS -- unlike
+  most DHCP servers -- does not mirror one into the other. Idempotency comes
+  from extracting the single pool block out of `show running-config` -- bounded
+  by the next `!` line or, if the pool is the last stanza in the buffer, by
+  end-of-output -- so a sibling pool's settings cannot be mistaken for this
+  one's.
+- **iPXE chainloading** with a role-rendered `autoexec.ipxe` menu from
+  `keenetic_pxe_menu`. iPXE fetches that file from the TFTP server it booted
+  from before re-requesting DHCP, which is what breaks the loop where the pool
+  hands out `ipxe.efi` to an iPXE that is already running.
+- **A service state separate from role management.**
+  `keenetic_pxe_service_state` (`started` / `stopped`) is distinct from
+  `keenetic_pxe_enabled`, held in a `disabled` flag file under
+  `keenetic_pxe.conf_dir` that both init scripts honour, so a deliberate stop
+  survives a reboot and a later deploy. Same shape as the xray pair.
+- **The `keenetic.pxe` tag**, added to `detect.yml`'s tag list so a tagged run
+  still gathers the facts the LAN address is derived from.
+
 ## 1.0.0
 
 Initial release. A standalone role rather than a `flyoverhead.*` collection,
