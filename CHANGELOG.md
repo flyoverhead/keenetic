@@ -33,6 +33,31 @@ All notable changes to `keenetic`.
 - **The `keenetic.pxe` tag**, added to `detect.yml`'s tag list so a tagged run
   still gathers the facts the LAN address is derived from.
 
+### Known issues
+
+- **Unverified against hardware.** No dry run, real run or idempotency
+  re-run has been performed against a live Keenetic router. The dry run,
+  real run, physical-client boot and idempotency re-run this feature needs
+  before it can be trusted are all still pending.
+- **DHCP-field idempotency assumes an unquoted rendering.** `pxe | set the
+  dhcp boot fields` compares each `next-server`/`bootfile`/option 66/option 67
+  value against `show running-config` on the assumption that it renders as
+  `option 66 ascii 192.168.1.1`, unquoted with the verb adjacent to the value.
+  If a firmware version quotes option output instead, those loop items report
+  `changed` on every run even though the router already has them set. Only a
+  router will settle which rendering is real.
+- **One `bootfile` per DHCP pool means one client architecture.** The default
+  is UEFI x64 (`ipxe.efi`). `undionly.kpxe` is staged alongside it, but
+  nothing auto-selects it -- serving both BIOS and UEFI from one pool needs
+  DHCP class matching on option 60, which is untested on KeeneticOS.
+- **The render-test harness has never run as a playbook.** Template
+  verification used a controller-side `$SCRATCH/pxe-render.yml`, never
+  committed to this role, that renders every PXE template against the role's
+  own defaults and asserts on the output. `ansible-playbook` is blocked in
+  the environment this feature was built in, so that harness ran through
+  ad-hoc `ansible` module invocations instead of the playbook run the plan
+  describes.
+
 ## 1.0.0
 
 Initial release. A standalone role rather than a `flyoverhead.*` collection,
