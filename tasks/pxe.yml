@@ -205,11 +205,12 @@
     # an already-correctly-configured router has no new failure mode to check
     # for here.
     #
-    # These three run inline rather than as handlers (ansible-lint's
-    # no-handler otherwise fires on a `when: ... is changed` task): a handler
-    # runs at flush_handlers, decoupled from this block and from the
-    # keenetic_pxe_pool_block_after fact the assert below needs, and would
-    # fail the play in the wrong place with none of this fail_msg's context.
+    # These three run inline, not as handlers (ansible-lint: no-handler
+    # suppresses that): main.yml's single flush_handlers fires at the role's
+    # end, and an explicit meta: flush_handlers here would trigger the pending
+    # `pxe | restart tftpd` handler before loaders and autoexec.ipxe are
+    # staged, risking transfer interruption (see the comment above the
+    # loader-staging tasks).
     - name: pxe | re-read the router running configuration  # noqa: no-handler
       ansible.builtin.command:
         cmd: ndmc -c "show running-config"

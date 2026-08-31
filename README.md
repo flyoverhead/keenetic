@@ -217,12 +217,12 @@ rather than gate execution.
   `changed` on every run even though the router already has them set.
 
 <details>
-<summary><b>Check mode</b> — what <code>--check --diff</code> covers, the nine probes that opt out of it, and two things it cannot tell you</summary>
+<summary><b>Check mode</b> — what <code>--check --diff</code> covers, the ten probes that opt out of it, and two things it cannot tell you</summary>
 
 `--check --diff` reports drift in `dropbear.conf`, `authorized_keys`, the opkg
 repo files, the cron jobs, the xray config, the netfilter hook and `S24xray`.
 
-Nine probes carry `check_mode: false`, because they only read and later tasks
+Ten probes carry `check_mode: false`, because they only read and later tasks
 branch on their output. Left to be skipped, each would fabricate a result that
 reads as a definite answer rather than "unknown":
 
@@ -239,11 +239,12 @@ reads as a definite answer rather than "unknown":
 - `xray version` and `S24xray status` in [tasks/xray.yml](tasks/xray.yml),
   which otherwise read as "nothing installed" and "not running" and make every
   dry run claim a binary install and a service change.
-- `ndmc -c "show running-config"`, `S59tftpd status` and `S82pxehttpd status`
+- Two `ndmc -c "show running-config"` reads, `S59tftpd status` and `S82pxehttpd status`
   in [tasks/pxe.yml](tasks/pxe.yml). `command` fabricates rc 0 with empty
-  stdout under `--check`; for the running-config read that would fail the
-  dhcp-pool assertion below it on every dry run, even against a router that is
-  already configured correctly, and for the two service-status reads it reads
+  stdout under `--check`; for the initial running-config read that would fail the
+  dhcp-pool assertion on every dry run, even against a router that is
+  already configured correctly, for the re-read (after boot-field write) that would fail the
+  boot-field verification assertion, and for the two service-status reads it reads
   as "not running", making both converge tasks claim a change on every dry
   run.
 
