@@ -60,7 +60,7 @@ appends it. `id_ed25519` reads `~/.ssh/id_ed25519.pub`.
 ## 🔍 Facts Set by This Role
 
 <details>
-<summary><b>All 25 rows</b> — including the two <code>ansible_*</code> connection variables the role rewrites</summary>
+<summary><b>All 28 rows</b> — including the two <code>ansible_*</code> connection variables the role rewrites</summary>
 
 | Fact | Description |
 | :--- | :--- |
@@ -83,6 +83,9 @@ appends it. `id_ed25519` reads `~/.ssh/id_ed25519.pub`.
 | `keenetic_xray_status` | `S24xray status` output, compared against `keenetic_xray_service_state` |
 | `keenetic_pxe_running_config` | `ndmc -c "show running-config"` output, the boot fields are diffed against it |
 | `keenetic_pxe_pool_block` | The single `ip dhcp pool` block extracted from the above, so a sibling pool's settings cannot be mistaken for this one's |
+| `keenetic_pxe_boot_fields_write` | Result of the DHCP boot-field write loop, used to gate the post-write verification below on whether anything actually changed |
+| `keenetic_pxe_running_config_after` | `ndmc -c "show running-config"` re-read after a boot-field write, to verify the write actually took |
+| `keenetic_pxe_pool_block_after` | The pool block re-extracted from the above, asserted to contain all four boot fields |
 | `keenetic_pxe_tftpd_status` | `S59tftpd status` output, compared against `keenetic_pxe_service_state` |
 | `keenetic_pxe_loader_download` | Result of the iPXE loader downloads, used for its `until` retry |
 | `keenetic_pxe_httpd_status` | `S82pxehttpd status` output, compared against `keenetic_pxe_service_state` |
@@ -149,6 +152,22 @@ rather than gate execution.
   `S59tftpd stop`. Both init scripts read one flag file under
   `keenetic_pxe.conf_dir`; stopping either out-of-band leaves that flag out of
   sync and the next deploy or reboot brings the daemon back.
+- Neither `keenetic_pxe_service_state: stopped` nor `keenetic_pxe_enabled:
+  false` un-configures the router's DHCP pool -- the first only stops the two
+  daemons, and the second skips the whole file, including the pool write.
+  Left alone, the pool keeps advertising a `next-server`/`bootfile` for a TFTP
+  server that is no longer answering, and every PXE-capable client on the LAN
+  stalls for its TFTP timeout at each cold boot. This is the same shape as
+  xray, which likewise does not uninstall itself when disabled, but it is
+  worth writing down because the symptom lands on every client on the
+  network, not just this host. To actually remove the boot fields:
+  ```
+  ndmc -c "no ip dhcp pool <pool> bootfile"
+  ndmc -c "no ip dhcp pool <pool> next-server"
+  ndmc -c "no ip dhcp pool <pool> option 66"
+  ndmc -c "no ip dhcp pool <pool> option 67"
+  ndmc -c "system configuration save"
+  ```
 - `dnsmasq-full` is in `keenetic_packages` on every host, it ships
   `/opt/etc/init.d/S56dnsmasq` with `ENABLED=yes`, and its packaged
   `dnsmasq.conf` is entirely comments -- so a running instance answers DNS on
@@ -170,13 +189,23 @@ rather than gate execution.
   `system configuration save`; if it is skipped, the boot fields survive until
   the next reboot and then silently vanish.
 - One `bootfile` per DHCP pool means one client architecture. The default is
-  UEFI x64 (`ipxe.efi`). `undionly.kpxe` is staged alongside it, but serving
-  both from one pool needs DHCP class matching on option 60, which is untested
-  on KeeneticOS.
+  UEFI x64 (`ipxe.efi`). `undionly.kpxe` is staged alongside it for a future
+  option-60/user-class DHCP change, **not** so `keenetic_pxe.bootfile` can be
+  repointed at it today. The loop-breaking mechanism this design relies on --
+  iPXE fetching `autoexec.ipxe` from the TFTP server it just booted from,
+  before re-requesting DHCP -- only exists in iPXE's EFI build. `undionly.kpxe`
+  has no equivalent, so pointing `bootfile` at it produces the exact infinite
+  chainload loop this design exists to avoid. Serving both architectures needs
+  DHCP class matching on option 60, which is untested on KeeneticOS.
 - TFTP and the image HTTP server bind `keenetic_pxe_next_server`, which defaults
   to the `br0` address. Neither is authenticated. On a router whose LAN bridge
   carries more than one address, set the variable explicitly rather than letting
   it pick.
+- Both the bind address in `S59tftpd`/`pxe-httpd.conf.j2` and the advertised
+  `next-server` in the DHCP pool are baked in at deploy time from
+  `keenetic_pxe_next_server`. Renumbering the LAN from the KeeneticOS web UI
+  changes neither -- re-run this role afterwards, or both daemons keep
+  listening on the old address and the pool keeps pointing clients at it.
 - Both roots live under `/opt`, the external drive. An unplugged stick means
   `S59tftpd` and `S82pxehttpd` refuse to start rather than serving an empty
   tree -- deliberately loud.
@@ -228,8 +257,10 @@ Two things a check run cannot tell you:
   administrative service state` uses `touch`, which reports `changed` on every
   real run by design and so carries `changed_when: false`; the flag file
   therefore appears unchanged in a check run whatever the declared state is.
-  Read `xray | converge the service to its declared state` instead — that is
-  the task that would act.
+  `pxe | set the administrative service state` has the identical property.
+  Read `xray | converge the service to its declared state` (or, for PXE,
+  `pxe | converge tftpd to its declared state` / `pxe | converge httpd to
+  its declared state`) instead — those are the tasks that would act.
 
 The preflight assertions do run, so a check against a bootstrapped aarch64
 router is a genuine way to verify the `xt_TPROXY` and port-443 preconditions

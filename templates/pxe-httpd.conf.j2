@@ -20,6 +20,11 @@ index-file.names            = ( "index.html" )
 
 include "/opt/etc/lighttpd/mime.conf"
 
-# Anything the mime map does not recognise -- kernels, initrds, squashfs images
-# -- is served as a byte stream rather than guessed at.
-mimetype.assign            += ( "" => "application/octet-stream" )
+# No catch-all mimetype.assign appended here: mime.conf already ends with
+# "" => "application/octet-stream", covering kernels, initrds and squashfs
+# images that the map does not otherwise recognise. Re-adding the identical
+# mapping is silently harmless on lighttpd 1.4.82 today only because the
+# values match byte-for-byte -- its config parser's duplicate-key branch
+# still logs "Duplicate array-key ''" to stderr on every load, and changing
+# either value turns that into a fatal parse error, -tt refuses to start,
+# and the deploy fails.

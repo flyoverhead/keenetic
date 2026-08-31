@@ -14,7 +14,9 @@ ROOT={{ keenetic_pxe.tftp_root }}
 # Bound to the LAN address, never 0.0.0.0. TFTP is unauthenticated and read-only
 # here, but there is no reason for it to answer on the WAN side even behind the
 # firewall.
-ADDRESS={{ keenetic_pxe_next_server }}:69
+NEXT_SERVER={{ keenetic_pxe_next_server }}
+ADDRESS="${NEXT_SERVER}:69"
+LAN_IFACE={{ keenetic_pxe.lan_iface }}
 # Administrative "stay stopped" marker, from keenetic_pxe_service_state. `stop`
 # alone cannot express intent: a stopped daemon is indistinguishable from one
 # not yet started, so the boot auto-start and the deploy handler would each undo
@@ -34,6 +36,26 @@ running() {
     kill -0 "$(cat "${PIDFILE}")" 2>/dev/null
 }
 
+wait_for_address() {
+    # keenetic_pxe_next_server is baked into ADDRESS at deploy time, but at
+    # boot rc.unslung can run before the LAN bridge has brought the address
+    # up. Without this, --address fails once, this script gives up after a
+    # single sleep, and nothing ever retries -- the netboot server is silently
+    # absent for the whole uptime. Same failure class S24xray's
+    # wait_for_tproxy guards against, polled with `ip -4 addr show` rather
+    # than GNU-only tooling, since this runs under busybox.
+    i=0
+    while [ "${i}" -lt 30 ]; do
+        if ip -4 addr show dev "${LAN_IFACE}" 2>/dev/null | grep -q "inet ${NEXT_SERVER}/"; then
+            return 0
+        fi
+        i=$((i + 1))
+        sleep 2
+    done
+    log "timed out waiting for ${NEXT_SERVER} on ${LAN_IFACE}"
+    return 1
+}
+
 start() {
     if [ -f "${DISABLED}" ]; then
         log "start refused: ${DISABLED} exists"
@@ -51,6 +73,8 @@ start() {
     # than a daemon quietly serving nothing. ROOT is on the external drive: this
     # is the unplugged-USB case, and it should be loud.
     [ -d "${ROOT}" ] || { log "missing tftp root ${ROOT}"; return 1; }
+
+    wait_for_address || return 1
 
     # --user root because tftpd-hpa defaults to "nobody", which is not
     # guaranteed to exist on KeeneticOS. --secure chroots and, with no -c, the

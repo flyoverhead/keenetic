@@ -47,9 +47,14 @@ All notable changes to `keenetic`.
   `changed` on every run even though the router already has them set. Only a
   router will settle which rendering is real.
 - **One `bootfile` per DHCP pool means one client architecture.** The default
-  is UEFI x64 (`ipxe.efi`). `undionly.kpxe` is staged alongside it, but
-  nothing auto-selects it -- serving both BIOS and UEFI from one pool needs
-  DHCP class matching on option 60, which is untested on KeeneticOS.
+  is UEFI x64 (`ipxe.efi`). `undionly.kpxe` is staged alongside it for a
+  future option-60/user-class DHCP change, not because repointing `bootfile`
+  at it today works: the loop-breaking mechanism this design relies on --
+  iPXE re-fetching `autoexec.ipxe` from the TFTP server it booted from -- is
+  EFI-only, and the BIOS `undionly.kpxe` build has no equivalent, so pointing
+  `bootfile` at it produces the exact infinite chainload loop this design
+  exists to avoid. Serving both BIOS and UEFI from one pool needs DHCP class
+  matching on option 60, which is untested on KeeneticOS.
 - **The render-test harness has never run as a playbook.** Template
   verification used a controller-side `$SCRATCH/pxe-render.yml`, never
   committed to this role, that renders every PXE template against the role's

@@ -102,7 +102,9 @@ keenetic_pxe:
   http_port: 8081
   # What the router's DHCP pool hands out as the BOOTP `file` field. UEFI x64 by
   # default; KeeneticOS serves one bootfile per pool and cannot reliably split
-  # BIOS from UEFI, so legacy clients need this repointed at undionly.kpxe.
+  # BIOS from UEFI. Do NOT repoint this at undionly.kpxe to serve legacy
+  # clients -- see the comment on keenetic_pxe_loaders below for why that
+  # loops instead of working.
   bootfile: ipxe.efi
   # tftpd-hpa's -m map file. Empty by default: the only thing it is needed for
   # is Windows/WDS boot, which requests paths with backslashes and mixed case.
@@ -126,8 +128,15 @@ keenetic_pxe_next_server: >-
 keenetic_pxe_dhcp_pool: _WEBADMIN
 
 # Loaders staged into the TFTP root. ipxe.efi is what keenetic_pxe.bootfile
-# points at by default; undionly.kpxe is staged alongside so a legacy-BIOS
-# client can be served by repointing the bootfile, without a second deploy.
+# points at by default; undionly.kpxe is staged alongside it for a future
+# option-60/user-class DHCP class match, NOT for repointing the bootfile at
+# it today. The loop-breaking trick this whole design relies on -- iPXE
+# fetching autoexec.ipxe from the TFTP server it just booted from, before
+# re-requesting DHCP -- is EFI-only (src/interface/efi/efi_autoexec.c
+# upstream); the BIOS undionly.kpxe build has no equivalent. Point bootfile
+# at it today and you get exactly the infinite chainload loop this design
+# claims to avoid: undionly boots, re-DHCPs, is handed undionly.kpxe again,
+# forever.
 #
 # boot.ipxe.org publishes no stable checksums -- upstream rebuilds the binaries
 # in place -- so `checksum` is optional per entry. Set it if you mirror the

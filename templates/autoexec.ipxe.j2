@@ -7,7 +7,10 @@
 # ipxe.efi again, forever. No custom-built binary needed.
 
 set base http://{{ keenetic_pxe_next_server }}:{{ keenetic_pxe.http_port }}
-set timeout 30000
+# 10s, not 30: every client with netboot ahead of local disk in its boot
+# order sits at this menu before falling through, and 30s of that per cold
+# boot is a bad default for a menu most boots are expected to skip.
+set timeout 10000
 
 :start
 menu Network boot -- {{ inventory_hostname }}
@@ -41,4 +44,5 @@ exit 1
 :failed
 echo Boot failed, returning to the menu in 5 seconds
 sleep 5
+imgfree
 goto start

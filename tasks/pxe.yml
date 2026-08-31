@@ -22,6 +22,38 @@
       on this router or facts were not gathered. Set keenetic_pxe_next_server
       to a literal address for this host.
 
+- name: pxe | require the bootfile to be staged
+  ansible.builtin.assert:
+    that:
+      - keenetic_pxe.bootfile in (keenetic_pxe_loaders | map(attribute='name') | list)
+    fail_msg: >-
+      keenetic_pxe.bootfile is '{{ keenetic_pxe.bootfile }}', but no entry in
+      keenetic_pxe_loaders stages a file by that name. The DHCP pool would
+      advertise a bootfile the TFTP root never serves, and every client would
+      TFTP-time-out on its first request. Add an entry to
+      keenetic_pxe_loaders, or repoint keenetic_pxe.bootfile at one that is
+      already there.
+
+- name: pxe | require menu entries to reference staged images
+  ansible.builtin.assert:
+    that:
+      - item.kernel in (keenetic_pxe_images | map(attribute='name') | list)
+      - item.initrd in (keenetic_pxe_images | map(attribute='name') | list)
+    fail_msg: >-
+      keenetic_pxe_menu entry '{{ item.id }}' references kernel
+      '{{ item.kernel }}' and initrd '{{ item.initrd }}', but at least one of
+      those names is missing from keenetic_pxe_images. A client choosing this
+      entry would 404 mid-boot. Stage the missing file (via
+      keenetic_pxe_images or out of band) or fix the entry's kernel/initrd
+      path.
+  loop: '{{ keenetic_pxe_menu }}'
+  loop_control:
+    label: '{{ item.id }}'
+  # Skipped when keenetic_pxe_images is empty: an operator may stage images
+  # out of band, outside this role's get_url tasks, and an empty list here
+  # says nothing about whether those files exist on disk.
+  when: keenetic_pxe_images | length > 0
+
 - name: pxe | install packages
   community.general.opkg:
     name:
@@ -109,11 +141,18 @@
     # trailing `!` for the non-greedy `.*?` to anchor on, and a boundary that
     # only accepted `!` would return no match at all -- failing the assertion
     # below on a router that is already configured correctly.
+    #
+    # `replace('\r', '')` strips CR before the regex runs: if `ndmc` ever
+    # emits CRLF, `^ip dhcp pool X$` matches nothing and the failure surfaces
+    # as "pool does not exist" below -- a misdiagnosis. `regex_escape` on the
+    # pool name keeps a name containing a regex metacharacter from corrupting
+    # the pattern.
     - name: pxe | extract the dhcp pool block
       ansible.builtin.set_fact:
         keenetic_pxe_pool_block: >-
-          {{ keenetic_pxe_running_config.stdout |
-          regex_search('(?ms)^ip dhcp pool ' ~ keenetic_pxe_dhcp_pool ~
+          {{ keenetic_pxe_running_config.stdout | replace('\r', '') |
+          regex_search('(?ms)^ip dhcp pool ' ~
+          (keenetic_pxe_dhcp_pool | regex_escape) ~
           '$.*?(?:^!$|\Z)') | default('', true) }}
 
     - name: pxe | require the dhcp pool to exist
@@ -152,8 +191,69 @@
       when: >-
         (item.verb ~ ' ' ~ item.value) not in keenetic_pxe_pool_block
       changed_when: true
+      register: keenetic_pxe_boot_fields_write
       notify:
         - pxe | save router configuration
+
+    # The pool-exists assertion above only proves the pool is there; it says
+    # nothing about whether this firmware actually understood the verbs. A
+    # build that does not support next-server/bootfile under `ip dhcp pool`,
+    # or that renders the value back differently (quoted, say), still returns
+    # 0 from ndmc -- the loop above reports changed, the save handler fires,
+    # and the router never netboots with nothing in this play's output to
+    # explain why. Gated on the write loop having actually changed something:
+    # an already-correctly-configured router has no new failure mode to check
+    # for here.
+    #
+    # These three run inline rather than as handlers (ansible-lint's
+    # no-handler otherwise fires on a `when: ... is changed` task): a handler
+    # runs at flush_handlers, decoupled from this block and from the
+    # keenetic_pxe_pool_block_after fact the assert below needs, and would
+    # fail the play in the wrong place with none of this fail_msg's context.
+    - name: pxe | re-read the router running configuration  # noqa: no-handler
+      ansible.builtin.command:
+        cmd: ndmc -c "show running-config"
+      register: keenetic_pxe_running_config_after
+      changed_when: false
+      check_mode: false
+      when: keenetic_pxe_boot_fields_write is changed
+
+    - name: pxe | re-extract the dhcp pool block  # noqa: no-handler
+      ansible.builtin.set_fact:
+        keenetic_pxe_pool_block_after: >-
+          {{ keenetic_pxe_running_config_after.stdout | replace('\r', '') |
+          regex_search('(?ms)^ip dhcp pool ' ~
+          (keenetic_pxe_dhcp_pool | regex_escape) ~
+          '$.*?(?:^!$|\Z)') | default('', true) }}
+      when: keenetic_pxe_boot_fields_write is changed
+
+    - name: pxe | verify the dhcp boot fields were actually written  # noqa: no-handler
+      ansible.builtin.assert:
+        that:
+          - >-
+            ('next-server ' ~ keenetic_pxe_next_server) in
+            keenetic_pxe_pool_block_after
+          - >-
+            ('bootfile ' ~ keenetic_pxe.bootfile) in
+            keenetic_pxe_pool_block_after
+          - >-
+            ('option 66 ascii ' ~ keenetic_pxe_next_server) in
+            keenetic_pxe_pool_block_after
+          - >-
+            ('option 67 ascii ' ~ keenetic_pxe.bootfile) in
+            keenetic_pxe_pool_block_after
+        fail_msg: >-
+          ndmc reported success writing next-server/bootfile/option 66/option
+          67 into `ip dhcp pool {{ keenetic_pxe_dhcp_pool }}`, but at least one
+          is missing from `show running-config` right after the write. Either
+          this firmware does not support one of those verbs under
+          `ip dhcp pool` and silently ignored it, or it renders the value back
+          differently than written (quoted, say, instead of bare) -- ndmc
+          accepts and discards unsupported verbs without error, so this is the
+          only way to catch it. Run
+          `ndmc -c "show running-config"` on the router and compare the pool
+          block by eye against what was requested.
+      when: keenetic_pxe_boot_fields_write is changed
 
 # No notify on either task below: tftpd-hpa reads files from disk on every
 # request rather than holding them in memory, so a new loader or menu is live
