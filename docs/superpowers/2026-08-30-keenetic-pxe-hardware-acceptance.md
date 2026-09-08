@@ -1,8 +1,30 @@
 # PXE hardware acceptance checklist
 
-**Status as of 2026-09-08: steps 1-4 and 6 pass on a live router. Steps 5 and 7
-are still outstanding.** Run against gigamsk with Debian 13 and Ubuntu 26.04
-amd64 staged. What was found, because none of it was visible from the code:
+**Status as of 2026-09-08: steps 1-4, 6 and 7 pass on a live router. Only step 5
+(physical client boot) is outstanding.** Run against gigamsk with Debian 13 and
+Ubuntu 26.04 amd64 staged. What was found, because none of it was visible from
+the code:
+
+- **Step 7a passes.** After `ndmc -c "system reboot"` both daemons came back on
+  *new* pids (925/961, from 14967/14996), which is what proves `rc.unslung`
+  starts both hand-written init scripts on its own, and all four DHCP boot
+  fields were still present -- so `system configuration save` does persist them.
+  TFTP and HTTP were functional again with no intervention.
+- **Step 7b passes, and it is the one worth keeping.** With the `disabled` flag
+  present and both daemons *running* beforehand, they came back **stopped** from
+  the reboot, with nothing on `:69` and nothing of the role's on `br0:8081`. The
+  flag file itself survived. That is `rc.unslung` calling `start` and both
+  scripts refusing -- the mechanism demonstrated rather than assumed.
+- **The router returns in ~90 seconds, not the ~6 minutes folklore suggests.**
+- **Do not poll the SSH port to detect the reboot -- it is a false pass.** The
+  port answered immediately after `system reboot` was activated, because the old
+  sshd had not gone down yet, reporting "back up" 0s in. Poll `/proc/uptime` and
+  wait for the value to *decrease*; that is the only signal that cannot lie.
+- **Check what else auto-starts before rebooting this router.** `S24xray` has
+  the same flag mechanism, and it was found stopped *without* its flag set --
+  so the reboot resurrected LAN-wide TPROXY interception as a side effect. A
+  bare `S24xray stop` leaves exactly that inconsistency behind. Read both
+  services' flag state before power-cycling, not just the one under test.
 
 - **Step 1 (dry run) cannot fully pass on a first deployment, and that is not a
   defect to chase.** In check mode `pxe | create directories` reports `changed`

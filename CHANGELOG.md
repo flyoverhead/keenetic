@@ -35,9 +35,19 @@ and HTTP 200 on every staged image.
   role's instance binds the br0 address specifically, and both listen at once.
   Check `netstat -ltn` per address before concluding the port is taken.
 
-Still outstanding: the power-cycle checks (7a/7b) and a physical client boot.
-Everything above would pass identically on a router that loses PXE at the next
-power cut.
+**The power-cycle checks (7a/7b) also pass.** Both daemons came back from
+`ndmc -c "system reboot"` on new pids with all four DHCP boot fields intact, so
+`rc.unslung` does start both hand-written init scripts and
+`system configuration save` does persist the boot fields. With the `disabled`
+flag set and both daemons running beforehand, they came back **stopped** --
+demonstrating the flag mechanism rather than assuming it.
+
+Two notes for anyone repeating this: the router returns in ~90 seconds, and
+polling the SSH port to detect the reboot is a **false pass** (it answers before
+the old sshd goes down). Watch `/proc/uptime` decrease instead.
+
+Still outstanding: a physical client boot, the only thing that proves a PXE
+option ROM accepts these fields.
 
 ## 1.1.0
 
