@@ -46,8 +46,16 @@ Two notes for anyone repeating this: the router returns in ~90 seconds, and
 polling the SSH port to detect the reboot is a **false pass** (it answers before
 the old sshd goes down). Watch `/proc/uptime` decrease instead.
 
-Still outstanding: a physical client boot, the only thing that proves a PXE
-option ROM accepts these fields.
+**A physical client boot also passes**, which completes the checklist. Verified
+with the Ubuntu 26.04 menu entry -- the harder of the two, since it exercises
+the casper-ramdisk path where the initrd pulls the full live-server ISO back
+over HTTP from the router, and proves a real PXE option ROM accepts the ascii
+option-67 encoding written here.
+
+Not verified: the Debian entry's boot path. It is a different mechanism --
+`debian-installer` fetches packages from a mirror over the WAN mid-install
+rather than from a locally staged ISO -- so the Ubuntu result does not carry
+over to it.
 
 ## 1.1.0
 

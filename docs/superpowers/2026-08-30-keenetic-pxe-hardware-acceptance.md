@@ -1,9 +1,24 @@
 # PXE hardware acceptance checklist
 
-**Status as of 2026-09-08: steps 1-4, 6 and 7 pass on a live router. Only step 5
-(physical client boot) is outstanding.** Run against gigamsk with Debian 13 and
-Ubuntu 26.04 amd64 staged. What was found, because none of it was visible from
-the code:
+**Status as of 2026-09-08: the whole checklist passes on a live router.** Run
+against gigamsk with Debian 13 and Ubuntu 26.04 amd64 staged. What was found,
+because none of it was visible from the code:
+
+- **Step 5 passes: a physical client reached the menu and booted.** Verified
+  with the **Ubuntu 26.04 entry**, which is the harder of the two -- it proves
+  the whole chain end to end, including the part unique to Ubuntu since 20.04:
+  the netboot `linux`+`initrd` bring up a casper ramdisk that then pulls the
+  full live-server ISO back over HTTP from `keenetic_pxe.http_root`, so an
+  `iso-url` pointing at the router actually works and the option-67 ascii
+  encoding this role writes is accepted by a real PXE option ROM.
+- **The Debian 13 entry has NOT been booted.** Its menu entry, checksums and
+  HTTP availability are verified, but nothing has exercised its boot path. It
+  is a genuinely different mechanism -- `debian-installer` pulls packages from
+  a mirror over the WAN mid-install rather than from a locally staged ISO -- so
+  a success on Ubuntu does not transfer. On a router running the xray TProxy,
+  that mirror traffic is intercepted; suspect that first if a Debian install
+  stalls mid-download, since the Ubuntu path is self-contained and cannot show
+  the same symptom.
 
 - **Step 7a passes.** After `ndmc -c "system reboot"` both daemons came back on
   *new* pids (925/961, from 14967/14996), which is what proves `rc.unslung`
