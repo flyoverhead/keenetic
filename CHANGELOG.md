@@ -2,6 +2,43 @@
 
 All notable changes to `keenetic`.
 
+## 1.1.1
+
+### Fixed
+
+- **`keenetic_pxe_loaders` pointed at iPXE URLs that no longer exist.** Upstream
+  reorganised `boot.ipxe.org` into `<arch>-<platform>/` directories, and the flat
+  `https://boot.ipxe.org/ipxe.efi` this role shipped now returns **404** --
+  which is what the first real deploy failed on. The defaults are now
+  `x86_64-efi/ipxe.efi` and `x86_64-pcbios/undionly.kpxe`. The bare
+  `/undionly.kpxe` still resolves, so only one of the two entries was visibly
+  broken and the other was rotting silently; both are arch-explicit now so they
+  fail or survive together the next time upstream moves things. `name` stays the
+  bare filename -- it is what the DHCP pool advertises as `bootfile`.
+
+### Verified against hardware
+
+Supersedes the first two 1.1.0 known issues. Deployed to a live KeeneticOS
+router on 2026-09-08: dry run, real run (`ok=36 changed=19 failed=0`),
+idempotency re-run (**`changed=0`**, no handlers), both daemons running and
+bound to the LAN address only, all four DHCP boot fields written and confirmed
+by the role's own read-back, a TFTP fetch of `autoexec.ipxe` from a LAN client,
+and HTTP 200 on every staged image.
+
+- **The unquoted-rendering assumption holds on this firmware.** Pool options
+  render as `option 66 ascii 172.16.1.1`, verb adjacent and unquoted, so
+  `pxe | set the dhcp boot fields` is genuinely idempotent and none of the three
+  predicted false-positives fired. Do not rewrite that comparison on the
+  strength of a suspicion; a firmware that quotes them would still break it.
+- **A role-owned `lighttpd` on 8081 coexists with KeenDNS rather than colliding
+  with it.** KeeneticOS binds `198.51.100.11:8081` and the IPv6 address; this
+  role's instance binds the br0 address specifically, and both listen at once.
+  Check `netstat -ltn` per address before concluding the port is taken.
+
+Still outstanding: the power-cycle checks (7a/7b) and a physical client boot.
+Everything above would pass identically on a router that loses PXE at the next
+power cut.
+
 ## 1.1.0
 
 ### Added

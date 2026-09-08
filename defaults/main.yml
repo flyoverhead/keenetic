@@ -141,11 +141,27 @@ keenetic_pxe_dhcp_pool: _WEBADMIN
 # boot.ipxe.org publishes no stable checksums -- upstream rebuilds the binaries
 # in place -- so `checksum` is optional per entry. Set it if you mirror the
 # files somewhere you control.
+#
+# The URLs are the per-architecture paths, not the flat root ones. Upstream
+# reorganised boot.ipxe.org into <arch>-<platform>/ directories, and the old
+# flat https://boot.ipxe.org/ipxe.efi now returns 404 -- which is what this
+# role shipped until 2026-09-08, when the first real deploy failed on it.
+# `name` is deliberately still the bare filename: it is what the DHCP pool
+# advertises via keenetic_pxe.bootfile, so it must not gain the directory.
+#
+# https://boot.ipxe.org/undionly.kpxe does still resolve, but the arch-explicit
+# path is used for it too, so both entries fail or survive together the next
+# time upstream moves things rather than one silently rotting.
+#
+# arm64 lives at arm64-efi/ipxe.efi if this is ever extended, and there are
+# Secure Boot variants under <arch>-efi-sb/ plus shimx64.efi at the root: a
+# UEFI client with Secure Boot enabled will refuse to run the unsigned binary
+# staged here.
 keenetic_pxe_loaders:
   - name: ipxe.efi
-    url: https://boot.ipxe.org/ipxe.efi
+    url: https://boot.ipxe.org/x86_64-efi/ipxe.efi
   - name: undionly.kpxe
-    url: https://boot.ipxe.org/undionly.kpxe
+    url: https://boot.ipxe.org/x86_64-pcbios/undionly.kpxe
 
 # Entries rendered into autoexec.ipxe. `kernel` and `initrd` are paths relative
 # to keenetic_pxe.http_root; the menu prefixes them with the HTTP base URL.

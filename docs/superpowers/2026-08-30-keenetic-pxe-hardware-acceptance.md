@@ -1,10 +1,38 @@
 # PXE hardware acceptance checklist
 
-Nothing in the 1.1.0 network-boot feature has been executed against a real
-Keenetic router. No playbook in that branch was ever run: `ansible-playbook`
-was blocked in the environment it was built in, so template verification went
-through ad-hoc `ansible` module calls instead. This is what still needs to
-happen on hardware, and what each failure signature means.
+**Status as of 2026-09-08: steps 1-4 and 6 pass on a live router. Steps 5 and 7
+are still outstanding.** Run against gigamsk with Debian 13 and Ubuntu 26.04
+amd64 staged. What was found, because none of it was visible from the code:
+
+- **Step 1 (dry run) cannot fully pass on a first deployment, and that is not a
+  defect to chase.** In check mode `pxe | create directories` reports `changed`
+  without creating anything, so `get_url` then fails with
+  `Destination /opt/srv/tftp does not exist`. The dry run is still worth doing --
+  it validated every assertion, the pool name, the LAN-address derivation and
+  both rendered templates, and it is what surfaced the 404 below -- but expect
+  the loader staging to fail until the directories exist for real.
+- **The 404.** `keenetic_pxe_loaders` shipped pointing at
+  `https://boot.ipxe.org/ipxe.efi`, which upstream has retired in favour of
+  per-architecture directories. Fixed in 1.1.1; if a fresh deploy fails on
+  `HTTP Error 404` staging a loader, upstream has moved the files again.
+- **Step 6 passes cleanly** -- `changed=0`, no handlers -- and **none of the
+  three predicted false-positives fired.** The reason is specific to this
+  firmware: it renders pool options unquoted (`option 66 ascii 172.16.1.1`),
+  exactly as the substring test assumes. Treat that as confirmed for this fleet,
+  not as proof the test is robust in general.
+- **Port 8081 was a false alarm.** KeenDNS holds 8081 on `198.51.100.11` and the
+  IPv6 address, not on the br0 address the role's daemons bind, so both listen
+  simultaneously. Check `netstat -ltn` *per address*.
+
+What remains is the part that matters most and is easiest to skip: **step 7's
+power-cycle checks and step 5's physical client boot.** Every check that passed
+above would pass identically on a router that loses PXE entirely at the next
+power cut, so nothing so far exercises the reboot claims at all.
+
+The original checklist follows. `ansible-playbook` was blocked in the
+environment this feature was built in, so template verification went through
+ad-hoc `ansible` module calls; the runs above were driven by the operator
+instead.
 
 
 Run these against a real, already-bootstrapped Keenetic router, in order,
