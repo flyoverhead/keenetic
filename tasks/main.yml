@@ -18,6 +18,7 @@
       tags:
         - keenetic.cron
         - keenetic.packages
+        - keenetic.pxe
         - keenetic.repo
         - keenetic.ssh
         - keenetic.user
@@ -25,6 +26,7 @@
   tags:
     - keenetic.cron
     - keenetic.packages
+    - keenetic.pxe
     - keenetic.repo
     - keenetic.ssh
     - keenetic.user
@@ -62,6 +64,17 @@
     - keenetic_xray_enabled | default(false)
   tags:
     - keenetic.xray
+
+- name: pxe
+  ansible.builtin.include_tasks:
+    file: pxe.yml
+    apply:
+      tags:
+        - keenetic.pxe
+  when:
+    - keenetic_pxe_enabled | default(false)
+  tags:
+    - keenetic.pxe
 
 # Tagged keenetic.cron because config.yml holds only the cron task. Tag
 # filtering drops an include_tasks task itself before the file is loaded

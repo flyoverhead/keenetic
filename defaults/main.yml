@@ -80,3 +80,108 @@ keenetic_cron_jobs: []
   #   hour: 5
   #   minute: 30
   #   job: /opt/etc/init.d/S24xray update-geofiles
+
+keenetic_pxe_enabled: false
+
+# started | stopped -- whether the PXE daemons run, as distinct from
+# keenetic_pxe_enabled, which is whether the role manages them at all. Same
+# split as keenetic_xray_service_state, and for the same reason: `stopped`
+# writes a flag the init scripts honour, so a deliberate stop survives a reboot
+# and a later deploy rather than being undone by the boot auto-start.
+keenetic_pxe_service_state: started
+
+keenetic_pxe:
+  # /opt is the external drive. The TFTP root and the image root live there
+  # because the router's own rootfs is a small read-only squashfs.
+  tftp_root: /opt/srv/tftp
+  http_root: /opt/srv/http
+  conf_dir: /opt/etc/pxe
+  lan_iface: br0
+  # Not 80: the KeeneticOS web UI holds it. Not 8080 blindly either -- check
+  # nothing else on the router has taken it before overriding.
+  http_port: 8081
+  # What the router's DHCP pool hands out as the BOOTP `file` field. UEFI x64 by
+  # default; KeeneticOS serves one bootfile per pool and cannot reliably split
+  # BIOS from UEFI. Do NOT repoint this at undionly.kpxe to serve legacy
+  # clients -- see the comment on keenetic_pxe_loaders below for why that
+  # loops instead of working.
+  bootfile: ipxe.efi
+  # tftpd-hpa's -m map file. Empty by default: the only thing it is needed for
+  # is Windows/WDS boot, which requests paths with backslashes and mixed case.
+  # Left as a hook rather than removed, because it is the single capability
+  # dnsmasq's built-in TFTP server cannot provide.
+  remap_file: ''
+  log_file: /opt/var/log/pxe-httpd.log
+
+# The address clients are told to fetch the loader from, and the address both
+# daemons bind. Derived from the LAN bridge rather than hardcoded so a router on
+# a non-default subnet works untouched. Override with a literal if the bridge
+# carries more than one address.
+keenetic_pxe_next_server: >-
+  {{ ansible_facts[keenetic_pxe.lan_iface].ipv4.address | default('') }}
+
+# The KeeneticOS DHCP pool that gets the boot fields. `_WEBADMIN` on a flat
+# config; segmented routers use names like `_WEBADMIN_HOME`. Read the real name
+# out of `ndmc -c "show running-config"` -- the assertion in pxe.yml fails
+# loudly rather than writing into a pool that does not exist. Set to an empty
+# string to have the role leave the router's DHCP configuration alone.
+keenetic_pxe_dhcp_pool: _WEBADMIN
+
+# Loaders staged into the TFTP root. ipxe.efi is what keenetic_pxe.bootfile
+# points at by default; undionly.kpxe is staged alongside it for a future
+# option-60/user-class DHCP class match, NOT for repointing the bootfile at
+# it today. The loop-breaking trick this whole design relies on -- iPXE
+# fetching autoexec.ipxe from the TFTP server it just booted from, before
+# re-requesting DHCP -- is EFI-only (src/interface/efi/efi_autoexec.c
+# upstream); the BIOS undionly.kpxe build has no equivalent. Point bootfile
+# at it today and you get exactly the infinite chainload loop this design
+# claims to avoid: undionly boots, re-DHCPs, is handed undionly.kpxe again,
+# forever.
+#
+# boot.ipxe.org publishes no stable checksums -- upstream rebuilds the binaries
+# in place -- so `checksum` is optional per entry. Set it if you mirror the
+# files somewhere you control.
+#
+# The URLs are the per-architecture paths, not the flat root ones. Upstream
+# reorganised boot.ipxe.org into <arch>-<platform>/ directories, and the old
+# flat https://boot.ipxe.org/ipxe.efi now returns 404 -- which is what this
+# role shipped until 2026-09-08, when the first real deploy failed on it.
+# `name` is deliberately still the bare filename: it is what the DHCP pool
+# advertises via keenetic_pxe.bootfile, so it must not gain the directory.
+#
+# https://boot.ipxe.org/undionly.kpxe does still resolve, but the arch-explicit
+# path is used for it too, so both entries fail or survive together the next
+# time upstream moves things rather than one silently rotting.
+#
+# arm64 lives at arm64-efi/ipxe.efi if this is ever extended, and there are
+# Secure Boot variants under <arch>-efi-sb/ plus shimx64.efi at the root: a
+# UEFI client with Secure Boot enabled will refuse to run the unsigned binary
+# staged here.
+keenetic_pxe_loaders:
+  - name: ipxe.efi
+    url: https://boot.ipxe.org/x86_64-efi/ipxe.efi
+  - name: undionly.kpxe
+    url: https://boot.ipxe.org/x86_64-pcbios/undionly.kpxe
+
+# Entries rendered into autoexec.ipxe. `kernel` and `initrd` are paths relative
+# to keenetic_pxe.http_root; the menu prefixes them with the HTTP base URL.
+keenetic_pxe_menu: []
+  # - id: debian
+  #   label: Debian 12 netinstall
+  #   key: d
+  #   kernel: debian-12/linux
+  #   initrd: debian-12/initrd.gz
+  #   args: 'vga=788 --- quiet'
+
+# Boot payloads staged into keenetic_pxe.http_root and referenced by
+# keenetic_pxe_menu. Downloaded by the router over its own WAN link, not
+# proxied through the controller -- these are large files and /opt is where
+# they land. `name` may contain slashes to nest them, e.g. debian-12/linux.
+#
+# Give every entry a checksum: distributions rebuild netboot artefacts in place
+# under the same URL, and a silently updated kernel beside a stale initrd fails
+# at boot in a way that looks like a network problem.
+keenetic_pxe_images: []
+  # - name: debian-12/linux
+  #   url: https://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/debian-installer/amd64/linux
+  #   checksum: sha256:0000000000000000000000000000000000000000000000000000000000000000

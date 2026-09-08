@@ -1,0 +1,382 @@
+---
+
+- name: pxe | require a valid service state
+  ansible.builtin.assert:
+    that:
+      - keenetic_pxe_service_state in ['started', 'stopped']
+    fail_msg: >-
+      keenetic_pxe_service_state must be 'started' or 'stopped', got
+      {{ keenetic_pxe_service_state | default('undefined') }}. A typo would
+      otherwise be read as "not started" and silently disable network boot.
+
+- name: pxe | require a LAN address to advertise
+  ansible.builtin.assert:
+    that:
+      - keenetic_pxe_next_server | default('') | length > 0
+      - keenetic_pxe_next_server is match('^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    fail_msg: >-
+      keenetic_pxe_next_server resolved to
+      '{{ keenetic_pxe_next_server | default("undefined") }}', not an IPv4
+      address. It defaults to the address of
+      {{ keenetic_pxe.lan_iface }}, so either that bridge is named differently
+      on this router or facts were not gathered. Set keenetic_pxe_next_server
+      to a literal address for this host.
+
+- name: pxe | require the bootfile to be staged
+  ansible.builtin.assert:
+    that:
+      - keenetic_pxe.bootfile in (keenetic_pxe_loaders | map(attribute='name') | list)
+    fail_msg: >-
+      keenetic_pxe.bootfile is '{{ keenetic_pxe.bootfile }}', but no entry in
+      keenetic_pxe_loaders stages a file by that name. The DHCP pool would
+      advertise a bootfile the TFTP root never serves, and every client would
+      TFTP-time-out on its first request. Add an entry to
+      keenetic_pxe_loaders, or repoint keenetic_pxe.bootfile at one that is
+      already there.
+
+- name: pxe | require menu entries to reference staged images
+  ansible.builtin.assert:
+    that:
+      - item.kernel in (keenetic_pxe_images | map(attribute='name') | list)
+      - item.initrd in (keenetic_pxe_images | map(attribute='name') | list)
+    fail_msg: >-
+      keenetic_pxe_menu entry '{{ item.id }}' references kernel
+      '{{ item.kernel }}' and initrd '{{ item.initrd }}', but at least one of
+      those names is missing from keenetic_pxe_images. A client choosing this
+      entry would 404 mid-boot. Stage the missing file (via
+      keenetic_pxe_images or out of band) or fix the entry's kernel/initrd
+      path.
+  loop: '{{ keenetic_pxe_menu }}'
+  loop_control:
+    label: '{{ item.id }}'
+  # Skipped when keenetic_pxe_images is empty: an operator may stage images
+  # out of band, outside this role's get_url tasks, and an empty list here
+  # says nothing about whether those files exist on disk.
+  when: keenetic_pxe_images | length > 0
+
+- name: pxe | install packages
+  community.general.opkg:
+    name:
+      - tftpd-hpa
+    state: present
+
+- name: pxe | create directories
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - '{{ keenetic_pxe.conf_dir }}'
+    - '{{ keenetic_pxe.tftp_root }}'
+
+- name: pxe | install the tftpd init script
+  ansible.builtin.template:
+    src: S59tftpd.j2
+    dest: /opt/etc/init.d/S59tftpd
+    owner: root
+    group: root
+    mode: '0755'
+    validate: sh -n %s
+  notify:
+    - pxe | restart tftpd
+
+# Ordering matters, as it does for xray: after the init script, so the script
+# honouring this flag is in place, and before main.yml's flush_handlers, so a
+# restart notified above also sees it. Otherwise a deploy restarts a daemon that
+# was stopped on purpose.
+- name: pxe | set the administrative service state
+  ansible.builtin.file:
+    path: '{{ keenetic_pxe.conf_dir }}/disabled'
+    state: '{{ "absent" if keenetic_pxe_service_state == "started" else "touch" }}'
+    owner: root
+    group: root
+    mode: '0644'
+  # `touch` always reports changed; only absent->present is a real change, and
+  # the flag's content is never read.
+  changed_when: false
+
+# check_mode: false -- command has no check mode, so --check fabricates empty
+# stdout, which reads as "not running" and would make the converge task below
+# claim a change on every dry run. Read-only.
+- name: pxe | read the current tftpd state
+  ansible.builtin.command:
+    cmd: /opt/etc/init.d/S59tftpd status
+  register: keenetic_pxe_tftpd_status
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: pxe | converge tftpd to its declared state
+  ansible.builtin.command:
+    cmd: >-
+      /opt/etc/init.d/S59tftpd
+      {{ 'start' if keenetic_pxe_service_state == 'started' else 'stop' }}
+  changed_when: true
+  when: >-
+    (keenetic_pxe_service_state == 'started') !=
+    ('tftpd running' in keenetic_pxe_tftpd_status.stdout | default(''))
+
+- name: pxe | configure the router DHCP boot fields
+  when: keenetic_pxe_dhcp_pool | default('') | length > 0
+  block:
+
+    # check_mode: false -- read-only, and a fabricated empty stdout under
+    # --check would make the pool assertion below fail on every dry run.
+    - name: pxe | read the router running configuration
+      ansible.builtin.command:
+        cmd: ndmc -c "show running-config"
+      register: keenetic_pxe_running_config
+      changed_when: false
+      check_mode: false
+
+    # Scoped to the one pool, not a substring search of the whole config: a
+    # segmented router has several pools, and `bootfile ipxe.efi` sitting in the
+    # guest pool would otherwise read as "already configured" and the real pool
+    # would silently never be written.
+    #
+    # The closing boundary accepts a `!` line OR end-of-buffer (\Z): when the
+    # target pool is the last stanza in `show running-config`, there is no
+    # trailing `!` for the non-greedy `.*?` to anchor on, and a boundary that
+    # only accepted `!` would return no match at all -- failing the assertion
+    # below on a router that is already configured correctly.
+    #
+    # `replace('\r', '')` strips CR before the regex runs: if `ndmc` ever
+    # emits CRLF, `^ip dhcp pool X$` matches nothing and the failure surfaces
+    # as "pool does not exist" below -- a misdiagnosis. `regex_escape` on the
+    # pool name keeps a name containing a regex metacharacter from corrupting
+    # the pattern.
+    - name: pxe | extract the dhcp pool block
+      ansible.builtin.set_fact:
+        keenetic_pxe_pool_block: >-
+          {{ keenetic_pxe_running_config.stdout | replace('\r', '') |
+          regex_search('(?ms)^ip dhcp pool ' ~
+          (keenetic_pxe_dhcp_pool | regex_escape) ~
+          '$.*?(?:^!$|\Z)') | default('', true) }}
+
+    - name: pxe | require the dhcp pool to exist
+      ansible.builtin.assert:
+        that:
+          - keenetic_pxe_pool_block | length > 0
+        fail_msg: >-
+          No `ip dhcp pool {{ keenetic_pxe_dhcp_pool }}` block in this router's
+          running configuration. The pool is named `_WEBADMIN` on a flat config
+          and something like `_WEBADMIN_HOME` once network segments are in use.
+          Run `ndmc -c "show running-config"` on the router, find the real name,
+          and set keenetic_pxe_dhcp_pool for this host. Writing into a
+          non-existent pool would be accepted by ndmc and quietly do nothing.
+
+    # next-server and bootfile are the BOOTP siaddr/file header fields, and they
+    # are the ones that actually work: a large share of PXE option ROMs read
+    # those and ignore option 66 entirely. Options 66/67 are set as well, for
+    # the ROMs that do the reverse. KeeneticOS populates only what it is asked
+    # for -- unlike most DHCP servers, it does not mirror one into the other.
+    - name: pxe | set the dhcp boot fields
+      ansible.builtin.command:
+        cmd: >-
+          ndmc -c "ip dhcp pool {{ keenetic_pxe_dhcp_pool }}
+          {{ item.verb }} {{ item.value }}"
+      loop:
+        - verb: next-server
+          value: '{{ keenetic_pxe_next_server }}'
+        - verb: bootfile
+          value: '{{ keenetic_pxe.bootfile }}'
+        - verb: option 66 ascii
+          value: '{{ keenetic_pxe_next_server }}'
+        - verb: option 67 ascii
+          value: '{{ keenetic_pxe.bootfile }}'
+      loop_control:
+        label: '{{ item.verb }}'
+      when: >-
+        (item.verb ~ ' ' ~ item.value) not in keenetic_pxe_pool_block
+      changed_when: true
+      register: keenetic_pxe_boot_fields_write
+      notify:
+        - pxe | save router configuration
+
+    # The pool-exists assertion above only proves the pool is there; it says
+    # nothing about whether this firmware actually understood the verbs. A
+    # build that does not support next-server/bootfile under `ip dhcp pool`,
+    # or that renders the value back differently (quoted, say), still returns
+    # 0 from ndmc -- the loop above reports changed, the save handler fires,
+    # and the router never netboots with nothing in this play's output to
+    # explain why. Gated on the write loop having actually changed something:
+    # an already-correctly-configured router has no new failure mode to check
+    # for here.
+    #
+    # These three run inline, not as handlers (ansible-lint: no-handler
+    # suppresses that): main.yml's single flush_handlers fires at the role's
+    # end, and an explicit meta: flush_handlers here would trigger the pending
+    # `pxe | restart tftpd` handler before loaders and autoexec.ipxe are
+    # staged, risking transfer interruption (see the comment above the
+    # loader-staging tasks).
+    - name: pxe | re-read the router running configuration  # noqa: no-handler
+      ansible.builtin.command:
+        cmd: ndmc -c "show running-config"
+      register: keenetic_pxe_running_config_after
+      changed_when: false
+      check_mode: false
+      when: keenetic_pxe_boot_fields_write is changed
+
+    - name: pxe | re-extract the dhcp pool block  # noqa: no-handler
+      ansible.builtin.set_fact:
+        keenetic_pxe_pool_block_after: >-
+          {{ keenetic_pxe_running_config_after.stdout | replace('\r', '') |
+          regex_search('(?ms)^ip dhcp pool ' ~
+          (keenetic_pxe_dhcp_pool | regex_escape) ~
+          '$.*?(?:^!$|\Z)') | default('', true) }}
+      when: keenetic_pxe_boot_fields_write is changed
+
+    - name: pxe | verify the dhcp boot fields were actually written  # noqa: no-handler
+      ansible.builtin.assert:
+        that:
+          - >-
+            ('next-server ' ~ keenetic_pxe_next_server) in
+            keenetic_pxe_pool_block_after
+          - >-
+            ('bootfile ' ~ keenetic_pxe.bootfile) in
+            keenetic_pxe_pool_block_after
+          - >-
+            ('option 66 ascii ' ~ keenetic_pxe_next_server) in
+            keenetic_pxe_pool_block_after
+          - >-
+            ('option 67 ascii ' ~ keenetic_pxe.bootfile) in
+            keenetic_pxe_pool_block_after
+        fail_msg: >-
+          ndmc reported success writing next-server/bootfile/option 66/option
+          67 into `ip dhcp pool {{ keenetic_pxe_dhcp_pool }}`, but at least one
+          is missing from `show running-config` right after the write. Either
+          this firmware does not support one of those verbs under
+          `ip dhcp pool` and silently ignored it, or it renders the value back
+          differently than written (quoted, say, instead of bare) -- ndmc
+          accepts and discards unsupported verbs without error, so this is the
+          only way to catch it. Run
+          `ndmc -c "show running-config"` on the router and compare the pool
+          block by eye against what was requested.
+      when: keenetic_pxe_boot_fields_write is changed
+
+# No notify on either task below: tftpd-hpa reads files from disk on every
+# request rather than holding them in memory, so a new loader or menu is live
+# for the very next client without a restart, and restarting would only risk
+# interrupting a transfer already in flight.
+- name: pxe | stage the ipxe loaders
+  ansible.builtin.get_url:
+    url: '{{ item.url }}'
+    dest: '{{ keenetic_pxe.tftp_root }}/{{ item.name }}'
+    checksum: '{{ item.checksum | default(omit) }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: '{{ keenetic_pxe_loaders }}'
+  loop_control:
+    label: '{{ item.name }}'
+  register: keenetic_pxe_loader_download
+  until: keenetic_pxe_loader_download is succeeded
+  retries: 3
+
+- name: pxe | install the ipxe boot menu
+  ansible.builtin.template:
+    src: autoexec.ipxe.j2
+    dest: '{{ keenetic_pxe.tftp_root }}/autoexec.ipxe'
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: pxe | install the http server package
+  community.general.opkg:
+    name:
+      - lighttpd
+    state: present
+
+# The package ships S80lighttpd with ENABLED=yes and a config that sets no
+# server.port, so a stock instance binds :80 and fights the KeeneticOS web UI.
+# Disabling it here rather than removing the file: opkg owns it, and a removal
+# would come back on the next upgrade with ENABLED=yes again.
+- name: pxe | disable the packaged lighttpd instance
+  ansible.builtin.lineinfile:
+    path: /opt/etc/init.d/S80lighttpd
+    regexp: ^ENABLED=
+    line: ENABLED=no
+    owner: root
+    group: root
+    mode: '0755'
+  notify:
+    - pxe | stop the packaged lighttpd
+
+- name: pxe | create the image directory
+  ansible.builtin.file:
+    path: '{{ keenetic_pxe.http_root }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: pxe | install the http server config
+  ansible.builtin.template:
+    src: pxe-httpd.conf.j2
+    dest: '{{ keenetic_pxe.conf_dir }}/httpd.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - pxe | restart httpd
+
+- name: pxe | install the http server init script
+  ansible.builtin.template:
+    src: S82pxehttpd.j2
+    dest: /opt/etc/init.d/S82pxehttpd
+    owner: root
+    group: root
+    mode: '0755'
+    validate: sh -n %s
+  notify:
+    - pxe | restart httpd
+
+# get_url writes straight into a nested path, so the parent directory needs to
+# exist first for any keenetic_pxe_images entry whose name contains a slash.
+- name: pxe | create the image subdirectories
+  ansible.builtin.file:
+    path: '{{ keenetic_pxe.http_root }}/{{ item.name | dirname }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop: '{{ keenetic_pxe_images }}'
+  loop_control:
+    label: '{{ item.name }}'
+  when: item.name is search('/')
+
+- name: pxe | stage the boot images
+  ansible.builtin.get_url:
+    url: '{{ item.url }}'
+    dest: '{{ keenetic_pxe.http_root }}/{{ item.name }}'
+    checksum: '{{ item.checksum | default(omit) }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: '{{ keenetic_pxe_images }}'
+  loop_control:
+    label: '{{ item.name }}'
+  register: keenetic_pxe_image_download
+  until: keenetic_pxe_image_download is succeeded
+  retries: 3
+
+# check_mode: false for the same reason as the tftpd read above.
+- name: pxe | read the current httpd state
+  ansible.builtin.command:
+    cmd: /opt/etc/init.d/S82pxehttpd status
+  register: keenetic_pxe_httpd_status
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: pxe | converge httpd to its declared state
+  ansible.builtin.command:
+    cmd: >-
+      /opt/etc/init.d/S82pxehttpd
+      {{ 'start' if keenetic_pxe_service_state == 'started' else 'stop' }}
+  changed_when: true
+  when: >-
+    (keenetic_pxe_service_state == 'started') !=
+    ('httpd running' in keenetic_pxe_httpd_status.stdout | default(''))

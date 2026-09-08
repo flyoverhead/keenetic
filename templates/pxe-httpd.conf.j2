@@ -1,0 +1,30 @@
+# {{ ansible_managed }}
+#
+# A role-owned lighttpd instance, deliberately NOT /opt/etc/lighttpd/lighttpd.conf:
+# that path is owned by the lighttpd package and an opkg upgrade would restore
+# the stock file, which sets no server.port and therefore binds :80 -- the
+# KeeneticOS web UI's port.
+
+server.document-root        = "{{ keenetic_pxe.http_root }}"
+server.bind                 = "{{ keenetic_pxe_next_server }}"
+server.port                 = {{ keenetic_pxe.http_port }}
+server.pid-file             = "/var/run/pxe-httpd.pid"
+server.errorlog             = "{{ keenetic_pxe.log_file }}"
+server.modules              = ( "mod_dirlisting" )
+
+# Directory listings are for debugging: "is the image actually on the router"
+# is the first question every failed boot raises, and answering it from a
+# browser beats an ssh session.
+dir-listing.activate        = "enable"
+index-file.names            = ( "index.html" )
+
+include "/opt/etc/lighttpd/mime.conf"
+
+# No catch-all mimetype.assign appended here: mime.conf already ends with
+# "" => "application/octet-stream", covering kernels, initrds and squashfs
+# images that the map does not otherwise recognise. Re-adding the identical
+# mapping is silently harmless on lighttpd 1.4.82 today only because the
+# values match byte-for-byte -- its config parser's duplicate-key branch
+# still logs "Duplicate array-key ''" to stderr on every load, and changing
+# either value turns that into a fatal parse error, -tt refuses to start,
+# and the deploy fails.

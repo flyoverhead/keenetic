@@ -5,13 +5,17 @@
 [![Platform](https://img.shields.io/badge/platform-Entware%20%2F%20KeeneticOS-0A6EBD)](#-quick-start)
 
 Configures a Keenetic router: SSH access, package installation, cron jobs,
-and an optional xray/TProxy deployment.
+and optional xray/TProxy and network-boot (PXE) deployments.
 
 ## 🚀 Quick Start
 
 Targets Entware on KeeneticOS. `ansible_python_interpreter` must point at
 `/opt/bin/python3`, and the role bootstraps that interpreter over `raw` on first
 contact if it is missing.
+
+Network boot (`pxe.yml`) is opt-in via `keenetic_pxe_enabled`, `false` by
+default, so a first-time run does not suddenly stand up a TFTP and HTTP
+server.
 
 ```yaml
 - name: keenetic
@@ -40,6 +44,14 @@ contact if it is missing.
 | `keenetic_xray` | Paths, TProxy port, fwmark, routing table, LAN interface, log file, corp dummy range and download URL | Definition example in [defaults/main.yml](defaults/main.yml) |
 | `keenetic_xray_config_src` | Path on the controller to the rendered client profile copied to the router | `{{ inventory_dir }}/files/clients/{{ keenetic_xray_server_name }}-{{ inventory_hostname }}.json` |
 | `keenetic_xray_server_name` | Name of the xray server host this router's client profile was generated against | `my-vps` |
+| `keenetic_pxe_enabled` | Whether this role manages the PXE daemons at all | `false` |
+| `keenetic_pxe_service_state` | `started` \| `stopped` — whether the PXE daemons should be running, distinct from `keenetic_pxe_enabled` | `started` |
+| `keenetic_pxe` | Paths, LAN interface, HTTP port, bootfile name and the optional tftpd remap file | Definition example in [defaults/main.yml](defaults/main.yml) |
+| `keenetic_pxe_next_server` | Address handed to clients and bound by both daemons; defaults to the `keenetic_pxe.lan_iface` address | `192.168.1.1` |
+| `keenetic_pxe_dhcp_pool` | KeeneticOS DHCP pool that receives the boot fields; empty string leaves the router's DHCP configuration untouched | `_WEBADMIN` |
+| `keenetic_pxe_loaders` | iPXE binaries staged into the TFTP root: `name`, `url`, optional `checksum` | Definition example in [defaults/main.yml](defaults/main.yml) |
+| `keenetic_pxe_menu` | Boot menu entries rendered into `autoexec.ipxe`: `id`, `label`, `key`, `kernel`, `initrd`, optional `args` | Definition example in [defaults/main.yml](defaults/main.yml) |
+| `keenetic_pxe_images` | Boot payloads staged into `keenetic_pxe.http_root`: `name` (may nest), `url`, `checksum` | Definition example in [defaults/main.yml](defaults/main.yml) |
 
 `keenetic_user.authorized_ssh_keys` names public keys under `~/.ssh` **on the
 controller**, without the `.pub` suffix — [tasks/connect.yml](tasks/connect.yml)
@@ -48,7 +60,7 @@ appends it. `id_ed25519` reads `~/.ssh/id_ed25519.pub`.
 ## 🔍 Facts Set by This Role
 
 <details>
-<summary><b>All 19 rows</b> — including the two <code>ansible_*</code> connection variables the role rewrites</summary>
+<summary><b>All 28 rows</b> — including the two <code>ansible_*</code> connection variables the role rewrites</summary>
 
 | Fact | Description |
 | :--- | :--- |
@@ -69,6 +81,15 @@ appends it. `id_ed25519` reads `~/.ssh/id_ed25519.pub`.
 | `keenetic_xray_stage` / `keenetic_xray_download` | Controller-side staging directory and release download |
 | `keenetic_xray_profile` | Whether `keenetic_xray_config_src` has been generated yet |
 | `keenetic_xray_status` | `S24xray status` output, compared against `keenetic_xray_service_state` |
+| `keenetic_pxe_running_config` | `ndmc -c "show running-config"` output, the boot fields are diffed against it |
+| `keenetic_pxe_pool_block` | The single `ip dhcp pool` block extracted from the above, so a sibling pool's settings cannot be mistaken for this one's |
+| `keenetic_pxe_boot_fields_write` | Result of the DHCP boot-field write loop, used to gate the post-write verification below on whether anything actually changed |
+| `keenetic_pxe_running_config_after` | `ndmc -c "show running-config"` re-read after a boot-field write, to verify the write actually took |
+| `keenetic_pxe_pool_block_after` | The pool block re-extracted from the above, asserted to contain all four boot fields |
+| `keenetic_pxe_tftpd_status` | `S59tftpd status` output, compared against `keenetic_pxe_service_state` |
+| `keenetic_pxe_loader_download` | Result of the iPXE loader downloads, used for its `until` retry |
+| `keenetic_pxe_httpd_status` | `S82pxehttpd status` output, compared against `keenetic_pxe_service_state` |
+| `keenetic_pxe_image_download` | Result of the boot image downloads, used for its `until` retry |
 | `ansible_port` | Rewritten to 22 while bootstrapping, then to `keenetic_ssh_port` once dropbear has moved |
 | `ansible_password` | Rewritten to the stock password when the first connection is refused |
 
@@ -84,15 +105,17 @@ appends it. `id_ed25519` reads `~/.ssh/id_ed25519.pub`.
 | `keenetic.ssh` | Dropbear config, authorized_keys, ssh port detection/change |
 | `keenetic.user` | Root password and connection bootstrap |
 | `keenetic.xray` | Preflight checks and xray install/config/service state |
+| `keenetic.pxe` | TFTP and HTTP boot services, and the router's DHCP boot fields |
 
-`detect.yml` carries all six tags, so any single tag still runs the fact
+`detect.yml` carries all seven tags, so any single tag still runs the fact
 gathering it depends on — `preflight.yml` reads `ansible_facts.kernel` for the
 `xt_TPROXY` path, which is why `keenetic.xray` is in that list too.
 
 `connect.yml` carries only `keenetic.ssh` and `keenetic.user`. A `keenetic.cron`,
-`keenetic.packages`, `keenetic.repo` or `keenetic.xray` run therefore does **not**
-re-run the connection bootstrap, and relies on `ansible_port` and the
-credentials in inventory already being correct for the router as it stands.
+`keenetic.packages`, `keenetic.repo`, `keenetic.xray` or `keenetic.pxe` run
+therefore does **not** re-run the connection bootstrap, and relies on
+`ansible_port` and the credentials in inventory already being correct for the
+router as it stands.
 That is deliberate: the bootstrap changes the root password and rewrites
 dropbear's config, which no other tag should imply.
 
@@ -125,14 +148,81 @@ rather than gate execution.
   `keenetic_xray_config_src` exists and tells you the exact command to generate
   it, which needs **both** `--tags xray.clients,xray.tuning` against the xray
   server host.
+- Stop the PXE daemons with `keenetic_pxe_service_state: stopped`, never a bare
+  `S59tftpd stop`. Both init scripts read one flag file under
+  `keenetic_pxe.conf_dir`; stopping either out-of-band leaves that flag out of
+  sync and the next deploy or reboot brings the daemon back.
+- Neither `keenetic_pxe_service_state: stopped` nor `keenetic_pxe_enabled:
+  false` un-configures the router's DHCP pool -- the first only stops the two
+  daemons, and the second skips the whole file, including the pool write.
+  Left alone, the pool keeps advertising a `next-server`/`bootfile` for a TFTP
+  server that is no longer answering, and every PXE-capable client on the LAN
+  stalls for its TFTP timeout at each cold boot. This is the same shape as
+  xray, which likewise does not uninstall itself when disabled, but it is
+  worth writing down because the symptom lands on every client on the
+  network, not just this host. To actually remove the boot fields:
+  ```
+  ndmc -c "no ip dhcp pool <pool> bootfile"
+  ndmc -c "no ip dhcp pool <pool> next-server"
+  ndmc -c "no ip dhcp pool <pool> option 66"
+  ndmc -c "no ip dhcp pool <pool> option 67"
+  ndmc -c "system configuration save"
+  ```
+- `dnsmasq-full` is in `keenetic_packages` on every host, it ships
+  `/opt/etc/init.d/S56dnsmasq` with `ENABLED=yes`, and its packaged
+  `dnsmasq.conf` is entirely comments -- so a running instance answers DNS on
+  :53 beside `ndnsproxy`. This role does not manage it. Check
+  `/opt/etc/init.d/S56dnsmasq check` before assuming the router's DNS path is
+  what you think it is, and do not build PXE on that daemon: without `port=0`
+  and with any `dhcp-range`, it competes with the router's own DHCP server for
+  the whole LAN.
+- The `lighttpd` package likewise ships `S80lighttpd` with `ENABLED=yes` and a
+  config that sets no `server.port`, so a stock instance binds :80 -- the web
+  UI's port. `pxe.yml` sets `ENABLED=no` there and runs its own instance from
+  `keenetic_pxe.conf_dir/httpd.conf`. Do not re-enable it.
+- `next-server` and `bootfile` are the fields that make network boot work, not
+  options 66/67. Many PXE option ROMs read the BOOTP `siaddr`/`file` header
+  fields and ignore option 66 entirely, and KeeneticOS populates only what it is
+  asked for. The role sets all four.
+- Router CLI changes made through `ndmc` live in the running configuration only.
+  The `pxe | save router configuration` handler runs
+  `system configuration save`; if it is skipped, the boot fields survive until
+  the next reboot and then silently vanish.
+- One `bootfile` per DHCP pool means one client architecture. The default is
+  UEFI x64 (`ipxe.efi`). `undionly.kpxe` is staged alongside it for a future
+  option-60/user-class DHCP change, **not** so `keenetic_pxe.bootfile` can be
+  repointed at it today. The loop-breaking mechanism this design relies on --
+  iPXE fetching `autoexec.ipxe` from the TFTP server it just booted from,
+  before re-requesting DHCP -- only exists in iPXE's EFI build. `undionly.kpxe`
+  has no equivalent, so pointing `bootfile` at it produces the exact infinite
+  chainload loop this design exists to avoid. Serving both architectures needs
+  DHCP class matching on option 60, which is untested on KeeneticOS.
+- TFTP and the image HTTP server bind `keenetic_pxe_next_server`, which defaults
+  to the `br0` address. Neither is authenticated. On a router whose LAN bridge
+  carries more than one address, set the variable explicitly rather than letting
+  it pick.
+- Both the bind address in `S59tftpd`/`pxe-httpd.conf.j2` and the advertised
+  `next-server` in the DHCP pool are baked in at deploy time from
+  `keenetic_pxe_next_server`. Renumbering the LAN from the KeeneticOS web UI
+  changes neither -- re-run this role afterwards, or both daemons keep
+  listening on the old address and the pool keeps pointing clients at it.
+- Both roots live under `/opt`, the external drive. An unplugged stick means
+  `S59tftpd` and `S82pxehttpd` refuse to start rather than serving an empty
+  tree -- deliberately loud.
+- `pxe.yml`'s DHCP boot-field write is only as idempotent as `ndmc`'s own
+  rendering. It compares each `next-server`/`bootfile`/option 66/option 67
+  value against `show running-config` assuming that output is unquoted and
+  sits directly after the verb (`option 66 ascii 192.168.1.1`); if a firmware
+  version quotes option values instead, those two loop items will report
+  `changed` on every run even though the router already has them set.
 
 <details>
-<summary><b>Check mode</b> — what <code>--check --diff</code> covers, the six probes that opt out of it, and two things it cannot tell you</summary>
+<summary><b>Check mode</b> — what <code>--check --diff</code> covers, the ten probes that opt out of it, and two things it cannot tell you</summary>
 
 `--check --diff` reports drift in `dropbear.conf`, `authorized_keys`, the opkg
 repo files, the cron jobs, the xray config, the netfilter hook and `S24xray`.
 
-Six probes carry `check_mode: false`, because they only read and later tasks
+Ten probes carry `check_mode: false`, because they only read and later tasks
 branch on their output. Left to be skipped, each would fabricate a result that
 reads as a definite answer rather than "unknown":
 
@@ -149,6 +239,14 @@ reads as a definite answer rather than "unknown":
 - `xray version` and `S24xray status` in [tasks/xray.yml](tasks/xray.yml),
   which otherwise read as "nothing installed" and "not running" and make every
   dry run claim a binary install and a service change.
+- Two `ndmc -c "show running-config"` reads, `S59tftpd status` and `S82pxehttpd status`
+  in [tasks/pxe.yml](tasks/pxe.yml). `command` fabricates rc 0 with empty
+  stdout under `--check`; for the initial running-config read that would fail the
+  dhcp-pool assertion on every dry run, even against a router that is
+  already configured correctly, for the re-read (after boot-field write) that would fail the
+  boot-field verification assertion, and for the two service-status reads it reads
+  as "not running", making both converge tasks claim a change on every dry
+  run.
 
 Two things a check run cannot tell you:
 
@@ -160,8 +258,10 @@ Two things a check run cannot tell you:
   administrative service state` uses `touch`, which reports `changed` on every
   real run by design and so carries `changed_when: false`; the flag file
   therefore appears unchanged in a check run whatever the declared state is.
-  Read `xray | converge the service to its declared state` instead — that is
-  the task that would act.
+  `pxe | set the administrative service state` has the identical property.
+  Read `xray | converge the service to its declared state` (or, for PXE,
+  `pxe | converge tftpd to its declared state` / `pxe | converge httpd to
+  its declared state`) instead — those are the tasks that would act.
 
 The preflight assertions do run, so a check against a bootstrapped aarch64
 router is a genuine way to verify the `xt_TPROXY` and port-443 preconditions
