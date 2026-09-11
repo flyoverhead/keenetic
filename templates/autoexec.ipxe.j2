@@ -6,6 +6,8 @@
 # it, the DHCP pool hands out ipxe.efi, iPXE re-requests DHCP, and is handed
 # ipxe.efi again, forever. No custom-built binary needed.
 
+isset ${net0/ip} || dhcp || goto nonet
+
 set base http://{{ keenetic_pxe_next_server }}:{{ keenetic_pxe.http_port }}
 # 10s, not 30: every client with netboot ahead of local disk in its boot
 # order sits at this menu before falling through, and 30s of that per cold
@@ -40,6 +42,12 @@ goto start
 # `exit`: exit 0 tells the firmware the boot succeeded and some implementations
 # then stop trying anything else.
 exit 1
+
+:nonet
+echo No network configuration -- DHCP failed and none was inherited.
+echo Every HTTP entry below will fail until this is resolved.
+prompt Press any key to continue to the menu anyway
+goto start
 
 :failed
 echo Boot failed, returning to the menu in 5 seconds
