@@ -70,6 +70,7 @@
   loop:
     - '{{ keenetic_pxe.conf_dir }}'
     - '{{ keenetic_pxe.tftp_root }}'
+    - '{{ keenetic_pxe.http_root }}'
 
 - name: pxe | install the tftpd init script
   ansible.builtin.template:
@@ -278,10 +279,13 @@
 - name: pxe | install the ipxe boot menu
   ansible.builtin.template:
     src: autoexec.ipxe.j2
-    dest: '{{ keenetic_pxe.tftp_root }}/autoexec.ipxe'
+    dest: '{{ item }}/autoexec.ipxe'
     owner: root
     group: root
     mode: '0644'
+  loop:
+    - '{{ keenetic_pxe.tftp_root }}'
+    - '{{ keenetic_pxe.http_root }}'
 
 - name: pxe | install the http server package
   community.general.opkg:
