@@ -1,0 +1,14 @@
+---
+
+ansible_host: 192.168.1.1
+ansible_hostname: giga
+
+keenetic_xray_enabled: true
+
+keenetic_xray_service_state: started
+
+keenetic_cron_jobs:
+  - name: update xray geofiles
+    hour: 5
+    minute: 30
+    job: /opt/etc/init.d/S24xray update-geofiles
