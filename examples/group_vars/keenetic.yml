@@ -1,0 +1,18 @@
+---
+
+ansible_port: 2022
+ansible_user: '{{ keenetic_user.name }}'
+ansible_python_interpreter: /opt/bin/python3
+
+keenetic_xray_version: '{{ xray_version }}'
+keenetic_xray_server_name: timeweb-ru
+keenetic_xray_config_src: >-
+  {{ inventory_dir }}/files/clients/{{ keenetic_xray_server_name }}-{{
+  inventory_hostname }}.json
+
+keenetic_user:
+  name: root
+  password: '{{ vault_keenetic_root_password }}'
+  authorized_ssh_keys:
+    - android
+    - id_ed25519

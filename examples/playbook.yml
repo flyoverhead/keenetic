@@ -1,0 +1,11 @@
+---
+
+- name: keenetic
+  hosts: keenetic
+  ignore_unreachable: true
+  gather_facts: true
+
+  roles:
+    - role: keenetic
+      tags:
+        - keenetic
