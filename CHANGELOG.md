@@ -2,6 +2,13 @@
 
 All notable changes to `keenetic`.
 
+## Unreleased
+
+### Documentation
+
+- The example host_vars no longer set `ansible_hostname`: nothing in the role
+  reads it, and the gathered fact outranked it anyway.
+
 ## 1.1.1
 
 ### Fixed
