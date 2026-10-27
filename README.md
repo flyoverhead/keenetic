@@ -24,7 +24,7 @@ server.
   gather_facts: true
 
   roles:
-    - role: keenetic
+    - role: flyoverhead.keenetic
       tags:
         - keenetic
 ```
