@@ -2,7 +2,17 @@
 
 All notable changes to `keenetic`.
 
-## Unreleased
+## 1.1.2
+
+### Fixed
+
+- A check run that has to update the xray binary no longer fails. The
+  controller-side staging (`tempfile`, `get_url`, `unarchive`) ran in check
+  mode too, so `tempfile` registered no `path`, and the download died on
+  `object of type 'dict' has no attribute 'path'`. The staging block and its
+  cleanup now run with `check_mode: false`; they only touch a temporary
+  directory on the controller. A check run therefore downloads the pinned
+  release, and the copy to the router reports whether the binary would change.
 
 ### Documentation
 

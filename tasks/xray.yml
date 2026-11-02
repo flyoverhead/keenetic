@@ -48,6 +48,7 @@
         - name: xray | download and extract on the controller
           become: false
           delegate_to: localhost
+          check_mode: false
           block:
 
             - name: xray | create a staging directory
@@ -90,6 +91,7 @@
         - name: xray | remove the staging directory
           become: false
           delegate_to: localhost
+          check_mode: false
           ansible.builtin.file:
             path: '{{ keenetic_xray_stage.path }}'
             state: absent
